@@ -1,0 +1,13 @@
+[package]
+name = "cornu-core"
+description = "Core engine of cornu: request model, variables and HTTP execution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
