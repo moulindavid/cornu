@@ -14,6 +14,12 @@ impl Response {
         (200..300).contains(&self.status)
     }
 
+    pub fn reason(&self) -> Option<&'static str> {
+        reqwest::StatusCode::from_u16(self.status)
+            .ok()?
+            .canonical_reason()
+    }
+
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
@@ -64,6 +70,12 @@ mod tests {
         assert!(response(204).is_success());
         assert!(!response(301).is_success());
         assert!(!response(404).is_success());
+    }
+
+    #[test]
+    fn reason_is_the_canonical_phrase() {
+        assert_eq!(response(404).reason(), Some("Not Found"));
+        assert_eq!(response(799).reason(), None);
     }
 
     #[test]
