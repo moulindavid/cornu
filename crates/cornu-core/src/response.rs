@@ -1,13 +1,11 @@
 use std::time::Duration;
 
-/// A response received from a server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Response {
     pub status: u16,
     /// Headers in the order they were received; names may repeat.
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
-    /// Time from sending the request to receiving the full body.
     pub elapsed: Duration,
 }
 
@@ -16,7 +14,6 @@ impl Response {
         (200..300).contains(&self.status)
     }
 
-    /// The first header with this name (case-insensitive).
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
@@ -28,7 +25,6 @@ impl Response {
         self.header("content-type")
     }
 
-    /// The body decoded as UTF-8, with invalid sequences replaced.
     pub fn text(&self) -> std::borrow::Cow<'_, str> {
         String::from_utf8_lossy(&self.body)
     }

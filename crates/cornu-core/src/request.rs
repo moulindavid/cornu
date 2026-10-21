@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Body, KeyValue, Method};
 
-/// A request as authored by the user, before variables are resolved.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request {
     pub name: String,
@@ -46,7 +45,6 @@ impl Request {
         self
     }
 
-    /// Whether an enabled header with this name (case-insensitive) is set.
     pub fn has_header(&self, name: &str) -> bool {
         crate::key_value::enabled(&self.headers).any(|(key, _)| key.eq_ignore_ascii_case(name))
     }

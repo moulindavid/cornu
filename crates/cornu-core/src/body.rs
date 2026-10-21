@@ -5,31 +5,27 @@ use serde::{Deserialize, Serialize};
 use crate::KeyValue;
 use crate::key_value::{enabled_default, is_true};
 
-/// The body of a request.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Body {
     #[default]
     None,
-    /// Free text sent as-is, with a user-chosen content type.
     Raw {
         text: String,
         #[serde(default = "default_raw_content_type")]
         content_type: String,
     },
-    /// JSON text, sent with `application/json`.
-    Json { text: String },
-    /// `application/x-www-form-urlencoded` fields.
+    Json {
+        text: String,
+    },
     FormUrlEncoded {
         #[serde(default)]
         fields: Vec<KeyValue>,
     },
-    /// `multipart/form-data` parts.
     Multipart {
         #[serde(default)]
         parts: Vec<MultipartPart>,
     },
-    /// The content of a file, sent as-is.
     Binary {
         path: PathBuf,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -38,10 +34,7 @@ pub enum Body {
 }
 
 impl Body {
-    /// The `Content-Type` this body implies, if any.
-    ///
-    /// For multipart bodies the boundary is chosen at send time, so only the
-    /// media type is returned.
+    /// The multipart boundary is only known at send time, so it is not included.
     pub fn content_type(&self) -> Option<&str> {
         match self {
             Body::None => None,
@@ -66,7 +59,6 @@ fn default_raw_content_type() -> String {
     "text/plain".to_owned()
 }
 
-/// One part of a multipart body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MultipartPart {
     pub name: String,

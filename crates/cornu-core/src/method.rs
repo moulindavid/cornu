@@ -3,10 +3,6 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-/// An HTTP request method.
-///
-/// Standard methods are matched case-insensitively. Any other valid token
-/// (for example `PURGE` or `PROPFIND`) is kept verbatim as [`Method::Custom`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(into = "String", try_from = "String")]
 pub enum Method {
@@ -24,7 +20,6 @@ pub enum Method {
 }
 
 impl Method {
-    /// The standard methods, in the order they are usually shown in a UI.
     pub const STANDARD: [Method; 9] = [
         Method::Get,
         Method::Post,

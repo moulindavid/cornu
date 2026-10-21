@@ -1,8 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-/// A key/value row, as used for headers, query parameters and form fields.
-///
-/// Disabled rows are kept (so the user can toggle them back on) but are not sent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyValue {
     pub key: String,
@@ -29,7 +26,6 @@ impl KeyValue {
     }
 }
 
-/// Iterates over the enabled rows as `(key, value)` pairs.
 pub fn enabled(rows: &[KeyValue]) -> impl Iterator<Item = (&str, &str)> {
     rows.iter()
         .filter(|row| row.enabled)
