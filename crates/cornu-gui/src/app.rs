@@ -1,0 +1,282 @@
+use std::time::Instant;
+
+use cornu_core::{Method, Request, Response};
+use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, RichText};
+use tokio::task::AbortHandle;
+
+use crate::format;
+use crate::worker::{DocId, Worker};
+
+const SEND_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
+
+enum SendState {
+    Idle,
+    Sending {
+        abort: AbortHandle,
+        started: Instant,
+    },
+    Done(Response),
+    Failed(String),
+}
+
+struct Document {
+    id: DocId,
+    request: Request,
+    state: SendState,
+}
+
+impl Document {
+    fn title(&self) -> &str {
+        if self.request.name.is_empty() {
+            "Untitled request"
+        } else {
+            &self.request.name
+        }
+    }
+}
+
+pub struct CornuApp {
+    worker: Worker,
+    documents: Vec<Document>,
+    open_tabs: Vec<DocId>,
+    active: Option<DocId>,
+    next_id: DocId,
+}
+
+impl CornuApp {
+    pub fn new(worker: Worker) -> Self {
+        let mut app = Self {
+            worker,
+            documents: Vec::new(),
+            open_tabs: Vec::new(),
+            active: None,
+            next_id: 0,
+        };
+        app.new_request();
+        app
+    }
+
+    fn new_request(&mut self) {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.documents.push(Document {
+            id,
+            request: Request::new(Method::Get, ""),
+            state: SendState::Idle,
+        });
+        self.open(id);
+    }
+
+    fn open(&mut self, id: DocId) {
+        if !self.open_tabs.contains(&id) {
+            self.open_tabs.push(id);
+        }
+        self.active = Some(id);
+    }
+
+    fn close(&mut self, id: DocId) {
+        let Some(index) = self.open_tabs.iter().position(|tab| *tab == id) else {
+            return;
+        };
+        self.open_tabs.remove(index);
+        if self.active == Some(id) {
+            self.active = self
+                .open_tabs
+                .get(index.min(self.open_tabs.len().saturating_sub(1)))
+                .copied();
+        }
+    }
+
+    fn document_mut(&mut self, id: DocId) -> Option<&mut Document> {
+        self.documents.iter_mut().find(|doc| doc.id == id)
+    }
+
+    fn collect_completed(&mut self) {
+        let completed: Vec<_> = self.worker.completed().collect();
+        for done in completed {
+            if let Some(doc) = self.document_mut(done.doc) {
+                doc.state = match done.result {
+                    Ok(response) => SendState::Done(response),
+                    Err(error) => SendState::Failed(error.to_string()),
+                };
+            }
+        }
+    }
+
+    fn sidebar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Requests");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("+ New").clicked() {
+                    self.new_request();
+                }
+            });
+        });
+        ui.separator();
+        let mut clicked = None;
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for doc in &self.documents {
+                let selected = self.active == Some(doc.id);
+                let label = format!("{}  {}", doc.request.method, doc.title());
+                if ui.selectable_label(selected, label).clicked() {
+                    clicked = Some(doc.id);
+                }
+            }
+        });
+        if let Some(id) = clicked {
+            self.open(id);
+        }
+    }
+
+    fn tab_bar(&mut self, ui: &mut egui::Ui) {
+        let mut activate = None;
+        let mut close = None;
+        egui::ScrollArea::horizontal().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for &id in &self.open_tabs {
+                    let Some(doc) = self.documents.iter().find(|doc| doc.id == id) else {
+                        continue;
+                    };
+                    let tab = ui.selectable_label(self.active == Some(id), doc.title());
+                    if tab.clicked() {
+                        activate = Some(id);
+                    }
+                    if tab.middle_clicked() || ui.small_button("×").clicked() {
+                        close = Some(id);
+                    }
+                    ui.separator();
+                }
+            });
+        });
+        if let Some(id) = activate {
+            self.active = Some(id);
+        }
+        if let Some(id) = close {
+            self.close(id);
+        }
+    }
+
+    fn request_view(&mut self, ui: &mut egui::Ui, id: DocId) {
+        let ctx = ui.ctx().clone();
+        let send_pressed = ui.input_mut(|input| input.consume_shortcut(&SEND_SHORTCUT));
+        let Some(doc) = self.documents.iter_mut().find(|doc| doc.id == id) else {
+            return;
+        };
+
+        let mut send = send_pressed;
+        let mut cancel = false;
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt(("method", id))
+                .selected_text(doc.request.method.as_str())
+                .width(90.0)
+                .show_ui(ui, |ui| {
+                    for method in Method::STANDARD {
+                        let label = method.to_string();
+                        ui.selectable_value(&mut doc.request.method, method, label);
+                    }
+                });
+            let sending = matches!(doc.state, SendState::Sending { .. });
+            let button = if sending { "Cancel" } else { "Send" };
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button(button).clicked() {
+                    if sending {
+                        cancel = true;
+                    } else {
+                        send = true;
+                    }
+                }
+                ui.add(
+                    egui::TextEdit::singleline(&mut doc.request.url)
+                        .hint_text("https://api.example.com/users")
+                        .desired_width(f32::INFINITY),
+                );
+            });
+        });
+
+        if cancel && let SendState::Sending { abort, .. } = &doc.state {
+            abort.abort();
+            doc.state = SendState::Failed("Cancelled".into());
+        } else if send && !matches!(doc.state, SendState::Sending { .. }) {
+            let abort = self.worker.send(&ctx, id, doc.request.clone());
+            doc.state = SendState::Sending {
+                abort,
+                started: Instant::now(),
+            };
+        }
+
+        ui.separator();
+        response_view(ui, &doc.state);
+    }
+}
+
+fn response_view(ui: &mut egui::Ui, state: &SendState) {
+    match state {
+        SendState::Idle => {
+            ui.weak("Send a request to see the response (Ctrl+Enter).");
+        }
+        SendState::Sending { started, .. } => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(format!("Sending… {}", format::duration(started.elapsed())));
+            });
+            ui.ctx().request_repaint();
+        }
+        SendState::Failed(message) => {
+            ui.colored_label(ui.visuals().error_fg_color, message);
+        }
+        SendState::Done(response) => {
+            ui.horizontal(|ui| {
+                let status = format!("{} {}", response.status, response.reason().unwrap_or(""));
+                ui.label(
+                    RichText::new(status)
+                        .strong()
+                        .color(status_color(response.status)),
+                );
+                ui.separator();
+                ui.label(format::duration(response.elapsed));
+                ui.separator();
+                ui.label(format::size(response.size()));
+            });
+            ui.separator();
+            let text = response.text();
+            let mut view: &str = &text;
+            egui::ScrollArea::both().show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut view)
+                        .code_editor()
+                        .desired_width(f32::INFINITY),
+                );
+            });
+        }
+    }
+}
+
+fn status_color(status: u16) -> Color32 {
+    match status {
+        200..300 => Color32::from_rgb(0x2e, 0xa0, 0x43),
+        300..400 => Color32::from_rgb(0x3b, 0x82, 0xf6),
+        400..500 => Color32::from_rgb(0xd9, 0x77, 0x06),
+        _ => Color32::from_rgb(0xdc, 0x26, 0x26),
+    }
+}
+
+impl eframe::App for CornuApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.collect_completed();
+
+        egui::Panel::left("sidebar")
+            .resizable(true)
+            .default_size(240.0)
+            .min_size(160.0)
+            .show(ui, |ui| self.sidebar(ui));
+
+        egui::Panel::top("tabs").show(ui, |ui| self.tab_bar(ui));
+
+        egui::CentralPanel::default().show(ui, |ui| match self.active {
+            Some(id) => self.request_view(ui, id),
+            None => {
+                ui.centered_and_justified(|ui| ui.weak("No request open"));
+            }
+        });
+    }
+}
