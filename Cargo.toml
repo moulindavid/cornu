@@ -10,6 +10,7 @@ repository = "https://github.com/moulindavid/cornu"
 rust-version = "1.85"
 
 [workspace.dependencies]
+base64 = "0.23"
 cornu-core = { path = "crates/cornu-core" }
 eframe = "0.37"
 fastrand = "2"

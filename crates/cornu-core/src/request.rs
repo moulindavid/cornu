@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Body, KeyValue, Method, PartValue, Variables};
+use crate::{Auth, Body, KeyValue, Method, PartValue, Variables};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request {
@@ -14,6 +14,8 @@ pub struct Request {
     pub query: Vec<KeyValue>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<KeyValue>,
+    #[serde(default, skip_serializing_if = "Auth::is_inherit")]
+    pub auth: Auth,
     #[serde(default, skip_serializing_if = "Body::is_none")]
     pub body: Body,
 }
@@ -39,6 +41,11 @@ impl Request {
 
     pub fn with_header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push(KeyValue::new(key, value));
+        self
+    }
+
+    pub fn with_auth(mut self, auth: Auth) -> Self {
+        self.auth = auth;
         self
     }
 
@@ -73,6 +80,9 @@ impl Request {
         {
             row.key = sub(&row.key);
             row.value = sub(&row.value);
+        }
+        for field in request.auth.fields_mut() {
+            *field = sub(field);
         }
         match &mut request.body {
             Body::None => {}
@@ -189,6 +199,23 @@ mod tests {
             unreachable!()
         };
         assert_eq!(parts[1].value, PartValue::File("/tmp/a.txt".into()));
+    }
+
+    #[test]
+    fn resolve_substitutes_auth_fields() {
+        let request = Request::new(Method::Get, "/").with_auth(Auth::Basic {
+            username: "{{user}}".into(),
+            password: "{{password}}".into(),
+        });
+        let resolved = request.resolve(&Variables::new().with_layer([("user", "admin")]));
+        assert_eq!(resolved.unresolved, ["password"]);
+        assert_eq!(
+            resolved.request.auth,
+            Auth::Basic {
+                username: "admin".into(),
+                password: "{{password}}".into(),
+            }
+        );
     }
 
     #[test]

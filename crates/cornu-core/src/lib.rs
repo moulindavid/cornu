@@ -1,3 +1,4 @@
+mod auth;
 mod body;
 mod http;
 pub mod key_value;
@@ -6,6 +7,7 @@ mod request;
 mod response;
 mod variables;
 
+pub use auth::{ApiKeyLocation, Auth};
 pub use body::{Body, MultipartPart, PartValue};
 pub use http::{ClientOptions, HttpClient, SendError};
 pub use key_value::KeyValue;
