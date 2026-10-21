@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use cornu_core::{
-    Body, ClientOptions, HttpClient, KeyValue, Method, MultipartPart, Request, SendError,
+    ApiKeyLocation, Auth, Body, ClientOptions, HttpClient, KeyValue, Method, MultipartPart,
+    Request, SendError, Variables,
 };
 use wiremock::matchers::{body_string, body_string_contains, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -287,4 +288,80 @@ async fn connection_refused_is_a_connect_error() {
     let request = Request::new(Method::Get, "http://127.0.0.1:1");
     let error = client().send(&request).await.unwrap_err();
     assert!(matches!(error, SendError::Connect(_)), "{error}");
+}
+
+#[tokio::test]
+async fn bearer_auth_is_injected_after_variable_resolution() {
+    let server = MockServer::start().await;
+    Mock::given(header("authorization", "Bearer s3cret"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let folder_auth = Auth::Bearer {
+        token: "{{token}}".into(),
+    };
+    let mut request = Request::new(Method::Get, server.uri());
+    request.auth = Auth::effective([&request.auth, &folder_auth]);
+    let variables = Variables::new().with_layer([("token", "s3cret")]);
+
+    let resolved = request.resolve(&variables);
+    assert!(resolved.unresolved.is_empty());
+    client().send(&resolved.request).await.unwrap();
+}
+
+#[tokio::test]
+async fn explicit_authorization_header_wins_over_auth() {
+    let server = MockServer::start().await;
+    Mock::given(header("authorization", "Custom xyz"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let request = Request::new(Method::Get, server.uri())
+        .with_header("Authorization", "Custom xyz")
+        .with_auth(Auth::Bearer {
+            token: "ignored".into(),
+        });
+    client().send(&request).await.unwrap();
+    let received = &server.received_requests().await.unwrap()[0];
+    assert_eq!(received.headers.get_all("authorization").iter().count(), 1);
+}
+
+#[tokio::test]
+async fn basic_auth_header_is_sent() {
+    let server = MockServer::start().await;
+    Mock::given(header("authorization", "Basic dXNlcjpwYXNz"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let request = Request::new(Method::Get, server.uri()).with_auth(Auth::Basic {
+        username: "user".into(),
+        password: "pass".into(),
+    });
+    client().send(&request).await.unwrap();
+}
+
+#[tokio::test]
+async fn api_key_in_query_is_appended() {
+    let server = MockServer::start().await;
+    Mock::given(query_param("api_key", "k1"))
+        .and(query_param("page", "1"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let request = Request::new(Method::Get, server.uri())
+        .with_query("page", "1")
+        .with_auth(Auth::ApiKey {
+            key: "api_key".into(),
+            value: "k1".into(),
+            location: ApiKeyLocation::Query,
+        });
+    client().send(&request).await.unwrap();
 }

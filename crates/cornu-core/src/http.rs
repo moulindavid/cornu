@@ -159,7 +159,13 @@ fn build_url(request: &Request) -> Result<Url, SendError> {
         url: raw.to_owned(),
         source,
     })?;
-    let mut query = key_value::enabled(&request.query).peekable();
+    let auth_query = request
+        .auth
+        .query()
+        .filter(|(key, _)| !key_value::enabled(&request.query).any(|(k, _)| k == *key));
+    let mut query = key_value::enabled(&request.query)
+        .chain(auth_query)
+        .peekable();
     if query.peek().is_some() {
         url.query_pairs_mut().extend_pairs(query);
     }
@@ -169,13 +175,24 @@ fn build_url(request: &Request) -> Result<Url, SendError> {
 fn build_headers(request: &Request) -> Result<HeaderMap, SendError> {
     let mut headers = HeaderMap::new();
     for (key, value) in key_value::enabled(&request.headers) {
-        let name = HeaderName::from_bytes(key.trim().as_bytes())
-            .map_err(|_| SendError::InvalidHeaderName(key.to_owned()))?;
-        let value = HeaderValue::from_str(value)
-            .map_err(|_| SendError::InvalidHeaderValue(key.to_owned()))?;
+        let (name, value) = parse_header(key, value)?;
+        headers.append(name, value);
+    }
+    if let Some((key, value)) = request.auth.header()
+        && !request.has_header(&key)
+    {
+        let (name, value) = parse_header(&key, &value)?;
         headers.append(name, value);
     }
     Ok(headers)
+}
+
+fn parse_header(key: &str, value: &str) -> Result<(HeaderName, HeaderValue), SendError> {
+    let name = HeaderName::from_bytes(key.trim().as_bytes())
+        .map_err(|_| SendError::InvalidHeaderName(key.to_owned()))?;
+    let value =
+        HeaderValue::from_str(value).map_err(|_| SendError::InvalidHeaderValue(key.to_owned()))?;
+    Ok((name, value))
 }
 
 async fn build_multipart(parts: &[crate::MultipartPart]) -> Result<multipart::Form, SendError> {
