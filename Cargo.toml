@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/moulindavid/cornu"
-rust-version = "1.85"
+rust-version = "1.95"
 
 [workspace.dependencies]
 base64 = "0.23"
