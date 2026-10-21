@@ -8,11 +8,14 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+fastrand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+time.workspace = true
 tokio = { workspace = true, features = ["fs"] }
 url.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
