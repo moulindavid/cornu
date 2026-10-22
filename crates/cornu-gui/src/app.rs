@@ -4,7 +4,9 @@ use cornu_core::{Method, Request, Response};
 use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, RichText};
 use tokio::task::AbortHandle;
 
+use crate::editor::{self, EditorState};
 use crate::format;
+use crate::widgets::vertical_split;
 use crate::worker::{DocId, Worker};
 
 const SEND_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
@@ -23,6 +25,7 @@ struct Document {
     id: DocId,
     request: Request,
     state: SendState,
+    editor: EditorState,
 }
 
 impl Document {
@@ -41,6 +44,7 @@ pub struct CornuApp {
     open_tabs: Vec<DocId>,
     active: Option<DocId>,
     next_id: DocId,
+    response_split: f32,
 }
 
 impl CornuApp {
@@ -51,6 +55,7 @@ impl CornuApp {
             open_tabs: Vec::new(),
             active: None,
             next_id: 0,
+            response_split: 0.55,
         };
         app.new_request();
         app
@@ -63,6 +68,7 @@ impl CornuApp {
             id,
             request: Request::new(Method::Get, ""),
             state: SendState::Idle,
+            editor: EditorState::default(),
         });
         self.open(id);
     }
@@ -185,11 +191,14 @@ impl CornuApp {
                         send = true;
                     }
                 }
-                ui.add(
+                let url = ui.add(
                     egui::TextEdit::singleline(&mut doc.request.url)
                         .hint_text("https://api.example.com/users")
                         .desired_width(f32::INFINITY),
                 );
+                if url.lost_focus() {
+                    editor::extract_query(&mut doc.request.url, &mut doc.request.query);
+                }
             });
         });
 
@@ -205,7 +214,17 @@ impl CornuApp {
         }
 
         ui.separator();
-        response_view(ui, &doc.state);
+        let editor_id = egui::Id::unique(("editor", id));
+        vertical_split(
+            ui,
+            egui::Id::unique("response-split"),
+            &mut self.response_split,
+            |ui| editor::request_editor(ui, editor_id, &mut doc.request, &mut doc.editor),
+            |ui| {
+                ui.add_space(6.0);
+                response_view(ui, &doc.state);
+            },
+        );
     }
 }
 
