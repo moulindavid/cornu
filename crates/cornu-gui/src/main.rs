@@ -1,5 +1,7 @@
 mod app;
+mod editor;
 mod format;
+mod widgets;
 mod worker;
 
 use eframe::egui;
