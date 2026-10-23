@@ -1,6 +1,8 @@
 mod app;
 mod editor;
 mod format;
+mod highlight;
+mod response;
 mod widgets;
 mod worker;
 
