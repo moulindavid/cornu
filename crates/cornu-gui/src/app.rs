@@ -5,9 +5,10 @@ use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 use tokio::task::AbortHandle;
 
 use crate::editor::{self, EditorState};
+use crate::environments::Environments;
 use crate::format;
 use crate::response::ResponseView;
-use crate::widgets::vertical_split;
+use crate::widgets::{variable_field, vertical_split};
 use crate::worker::{DocId, Worker};
 
 const SEND_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
@@ -27,6 +28,7 @@ struct Document {
     request: Request,
     state: SendState,
     editor: EditorState,
+    unresolved: Vec<String>,
 }
 
 impl Document {
@@ -46,6 +48,7 @@ pub struct CornuApp {
     active: Option<DocId>,
     next_id: DocId,
     response_split: f32,
+    environments: Environments,
 }
 
 impl CornuApp {
@@ -57,6 +60,7 @@ impl CornuApp {
             active: None,
             next_id: 0,
             response_split: 0.55,
+            environments: Environments::default(),
         };
         app.new_request();
         app
@@ -70,6 +74,7 @@ impl CornuApp {
             request: Request::new(Method::Get, ""),
             state: SendState::Idle,
             editor: EditorState::default(),
+            unresolved: Vec::new(),
         });
         self.open(id);
     }
@@ -166,6 +171,7 @@ impl CornuApp {
     fn request_view(&mut self, ui: &mut egui::Ui, id: DocId) {
         let ctx = ui.ctx().clone();
         let send_pressed = ui.input_mut(|input| input.consume_shortcut(&SEND_SHORTCUT));
+        let variables = self.environments.variables();
         let Some(doc) = self.documents.iter_mut().find(|doc| doc.id == id) else {
             return;
         };
@@ -192,10 +198,11 @@ impl CornuApp {
                         send = true;
                     }
                 }
-                let url = ui.add(
-                    egui::TextEdit::singleline(&mut doc.request.url)
-                        .hint_text("https://api.example.com/users")
-                        .desired_width(f32::INFINITY),
+                let url = variable_field(
+                    ui,
+                    &mut doc.request.url,
+                    &variables,
+                    "https://api.example.com/users",
                 );
                 if url.lost_focus() {
                     editor::extract_query(&mut doc.request.url, &mut doc.request.query);
@@ -207,7 +214,9 @@ impl CornuApp {
             abort.abort();
             doc.state = SendState::Failed("Cancelled".into());
         } else if send && !matches!(doc.state, SendState::Sending { .. }) {
-            let abort = self.worker.send(&ctx, id, doc.request.clone());
+            let resolved = doc.request.resolve(&variables);
+            doc.unresolved = resolved.unresolved;
+            let abort = self.worker.send(&ctx, id, resolved.request);
             doc.state = SendState::Sending {
                 abort,
                 started: Instant::now(),
@@ -223,6 +232,13 @@ impl CornuApp {
             |ui| editor::request_editor(ui, editor_id, &mut doc.request, &mut doc.editor),
             |ui| {
                 ui.add_space(6.0);
+                if !doc.unresolved.is_empty() && !matches!(doc.state, SendState::Idle) {
+                    let names = doc.unresolved.join(", ");
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!("⚠ Sent with unresolved variables: {names}"),
+                    );
+                }
                 response_view(ui, &mut doc.state);
             },
         );
@@ -258,7 +274,17 @@ impl eframe::App for CornuApp {
             .min_size(160.0)
             .show(ui, |ui| self.sidebar(ui));
 
-        egui::Panel::top("tabs").show(ui, |ui| self.tab_bar(ui));
+        egui::Panel::top("tabs").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let selector_width = 240.0;
+                let tabs_width = (ui.available_width() - selector_width).max(120.0);
+                let height = ui.spacing().interact_size.y;
+                ui.allocate_ui(egui::vec2(tabs_width, height), |ui| self.tab_bar(ui));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.environments.selector(ui);
+                });
+            });
+        });
 
         egui::CentralPanel::default().show(ui, |ui| match self.active {
             Some(id) => self.request_view(ui, id),
@@ -266,5 +292,7 @@ impl eframe::App for CornuApp {
                 ui.centered_and_justified(|ui| ui.weak("No request open"));
             }
         });
+
+        self.environments.manager(ui.ctx());
     }
 }

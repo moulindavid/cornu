@@ -1,5 +1,6 @@
 mod app;
 mod editor;
+mod environments;
 mod format;
 mod highlight;
 mod response;
