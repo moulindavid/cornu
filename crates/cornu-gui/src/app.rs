@@ -1,11 +1,12 @@
 use std::time::Instant;
 
-use cornu_core::{Method, Request, Response};
-use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, RichText};
+use cornu_core::{Method, Request};
+use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 use tokio::task::AbortHandle;
 
 use crate::editor::{self, EditorState};
 use crate::format;
+use crate::response::ResponseView;
 use crate::widgets::vertical_split;
 use crate::worker::{DocId, Worker};
 
@@ -17,7 +18,7 @@ enum SendState {
         abort: AbortHandle,
         started: Instant,
     },
-    Done(Response),
+    Done(Box<ResponseView>),
     Failed(String),
 }
 
@@ -102,7 +103,7 @@ impl CornuApp {
         for done in completed {
             if let Some(doc) = self.document_mut(done.doc) {
                 doc.state = match done.result {
-                    Ok(response) => SendState::Done(response),
+                    Ok(response) => SendState::Done(Box::new(ResponseView::new(response))),
                     Err(error) => SendState::Failed(error.to_string()),
                 };
             }
@@ -222,13 +223,13 @@ impl CornuApp {
             |ui| editor::request_editor(ui, editor_id, &mut doc.request, &mut doc.editor),
             |ui| {
                 ui.add_space(6.0);
-                response_view(ui, &doc.state);
+                response_view(ui, &mut doc.state);
             },
         );
     }
 }
 
-fn response_view(ui: &mut egui::Ui, state: &SendState) {
+fn response_view(ui: &mut egui::Ui, state: &mut SendState) {
     match state {
         SendState::Idle => {
             ui.weak("Send a request to see the response (Ctrl+Enter).");
@@ -243,39 +244,7 @@ fn response_view(ui: &mut egui::Ui, state: &SendState) {
         SendState::Failed(message) => {
             ui.colored_label(ui.visuals().error_fg_color, message);
         }
-        SendState::Done(response) => {
-            ui.horizontal(|ui| {
-                let status = format!("{} {}", response.status, response.reason().unwrap_or(""));
-                ui.label(
-                    RichText::new(status)
-                        .strong()
-                        .color(status_color(response.status)),
-                );
-                ui.separator();
-                ui.label(format::duration(response.elapsed));
-                ui.separator();
-                ui.label(format::size(response.size()));
-            });
-            ui.separator();
-            let text = response.text();
-            let mut view: &str = &text;
-            egui::ScrollArea::both().show(ui, |ui| {
-                ui.add(
-                    egui::TextEdit::multiline(&mut view)
-                        .code_editor()
-                        .desired_width(f32::INFINITY),
-                );
-            });
-        }
-    }
-}
-
-fn status_color(status: u16) -> Color32 {
-    match status {
-        200..300 => Color32::from_rgb(0x2e, 0xa0, 0x43),
-        300..400 => Color32::from_rgb(0x3b, 0x82, 0xf6),
-        400..500 => Color32::from_rgb(0xd9, 0x77, 0x06),
-        _ => Color32::from_rgb(0xdc, 0x26, 0x26),
+        SendState::Done(view) => view.show(ui),
     }
 }
 
