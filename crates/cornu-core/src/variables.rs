@@ -92,6 +92,10 @@ impl Variables {
             .map(String::as_str)
     }
 
+    pub fn is_defined(&self, name: &str) -> bool {
+        self.get(name).is_some() || is_dynamic(name)
+    }
+
     /// Unresolved placeholders are kept verbatim in the output.
     pub fn interpolate(&self, template: &str) -> Interpolated {
         let mut result = Interpolated {
@@ -128,6 +132,19 @@ impl Variables {
             }
         }
     }
+}
+
+pub const DYNAMIC_VARIABLES: [&str; 6] = [
+    "$uuid",
+    "$guid",
+    "$randomUUID",
+    "$timestamp",
+    "$isoTimestamp",
+    "$randomInt",
+];
+
+pub fn is_dynamic(name: &str) -> bool {
+    DYNAMIC_VARIABLES.contains(&name)
 }
 
 fn dynamic(name: &str) -> Option<String> {
@@ -270,6 +287,22 @@ mod tests {
             .parse()
             .unwrap();
         assert!(random <= 1000);
+    }
+
+    #[test]
+    fn every_dynamic_variable_generates_a_value() {
+        for name in DYNAMIC_VARIABLES {
+            assert!(dynamic(name).is_some(), "{name}");
+        }
+    }
+
+    #[test]
+    fn is_defined_covers_layers_and_dynamic_names() {
+        let variables = vars(&[("host", "x")]);
+        assert!(variables.is_defined("host"));
+        assert!(variables.is_defined("$uuid"));
+        assert!(!variables.is_defined("missing"));
+        assert!(!variables.is_defined("$unknown"));
     }
 
     #[test]
