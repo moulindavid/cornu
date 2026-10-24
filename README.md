@@ -29,6 +29,7 @@ On Linux you may need the usual windowing dev packages (X11/Wayland, `libxkbcomm
 | Crate | Purpose |
 |-------|---------|
 | `cornu-core` | Request model, variable interpolation, HTTP execution (no UI dependency) |
+| `cornu-storage` | Git-friendly workspace format: one TOML file per request, secrets kept in `.cornu/` |
 | `cornu-gui` | Desktop application (`cornu` binary) |
 
 ## License

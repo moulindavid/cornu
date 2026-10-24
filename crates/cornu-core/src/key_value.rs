@@ -8,6 +8,8 @@ pub struct KeyValue {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub secret: bool,
 }
 
 impl KeyValue {
@@ -17,11 +19,17 @@ impl KeyValue {
             value: value.into(),
             enabled: true,
             description: None,
+            secret: false,
         }
     }
 
     pub fn disabled(mut self) -> Self {
         self.enabled = false;
+        self
+    }
+
+    pub fn secret(mut self) -> Self {
+        self.secret = true;
         self
     }
 }
@@ -38,6 +46,10 @@ pub(crate) fn enabled_default() -> bool {
 
 pub(crate) fn is_true(value: &bool) -> bool {
     *value
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[cfg(test)]
