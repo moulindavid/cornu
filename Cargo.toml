@@ -12,6 +12,7 @@ rust-version = "1.95"
 [workspace.dependencies]
 base64 = "0.23"
 cornu-core = { path = "crates/cornu-core" }
+cornu-storage = { path = "crates/cornu-storage" }
 eframe = "0.37"
 fastrand = "2"
 rfd = "0.17"
