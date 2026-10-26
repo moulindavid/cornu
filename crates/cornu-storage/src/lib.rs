@@ -1,4 +1,5 @@
 mod edit;
+mod history;
 mod secrets;
 mod slug;
 
@@ -11,6 +12,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 pub use edit::moved_path;
+pub use history::{HISTORY_FILE, HISTORY_LIMIT, History, HistoryEntry, Outcome};
 use secrets::Secrets;
 pub use slug::slugify;
 

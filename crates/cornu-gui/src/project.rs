@@ -1,11 +1,12 @@
 use std::path::{Path, PathBuf};
 
 use cornu_core::{Auth, Environment, Variables};
-use cornu_storage::{EnvironmentEntry, Folder, Settings, StorageError, Workspace};
+use cornu_storage::{EnvironmentEntry, Folder, History, Settings, StorageError, Workspace};
 
 /// The open workspace, or an in-memory scratch one when nothing is open.
 pub struct Project {
     pub workspace: Workspace,
+    pub history: History,
     on_disk: bool,
 }
 
@@ -25,25 +26,33 @@ impl Project {
                 environments: Vec::new(),
                 problems: Vec::new(),
             },
+            history: History::default(),
             on_disk: false,
         }
     }
 
     pub fn open(root: &Path) -> Result<Self, StorageError> {
-        Ok(Self {
-            workspace: Workspace::load(root)?,
-            on_disk: true,
-        })
+        Ok(Self::on_disk(Workspace::load(root)?))
     }
 
     pub fn create(root: &Path) -> Result<Self, StorageError> {
         let name = root
             .file_name()
             .map_or("Workspace".into(), |name| name.to_string_lossy());
-        Ok(Self {
-            workspace: Workspace::init(root, &name)?,
+        Ok(Self::on_disk(Workspace::init(root, &name)?))
+    }
+
+    /// History is local convenience: failing to read it should not prevent opening.
+    fn on_disk(mut workspace: Workspace) -> Self {
+        let history = History::load(&workspace.root).unwrap_or_else(|error| {
+            workspace.problems.push(error.to_string());
+            History::default()
+        });
+        Self {
+            workspace,
+            history,
             on_disk: true,
-        })
+        }
     }
 
     pub fn is_on_disk(&self) -> bool {
