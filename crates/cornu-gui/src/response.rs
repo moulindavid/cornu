@@ -226,7 +226,7 @@ fn save_body(body: &[u8]) {
     }
 }
 
-fn status_color(status: u16) -> Color32 {
+pub fn status_color(status: u16) -> Color32 {
     match status {
         200..300 => Color32::from_rgb(0x2e, 0xa0, 0x43),
         300..400 => Color32::from_rgb(0x3b, 0x82, 0xf6),

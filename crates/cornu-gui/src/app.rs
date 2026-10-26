@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use cornu_core::{Method, Request};
-use cornu_storage::moved_path;
+use cornu_storage::{HistoryEntry, Outcome, moved_path};
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 use tokio::task::AbortHandle;
 
@@ -10,6 +10,7 @@ use crate::editor::{self, EditorState};
 use crate::environments::Environments;
 use crate::folder::{FolderTab, folder_view};
 use crate::format;
+use crate::history::{HistoryAction, HistoryPanel};
 use crate::project::Project;
 use crate::response::ResponseView;
 use crate::tree::{Tree, TreeAction, method_color};
@@ -26,6 +27,9 @@ enum SendState {
     Sending {
         abort: AbortHandle,
         started: Instant,
+        /// The request as edited when it was sent, recorded in the history.
+        sent: Box<Request>,
+        timestamp: i64,
     },
     Done(Box<ResponseView>),
     Failed(String),
@@ -105,6 +109,8 @@ pub struct CornuApp {
     response_split: f32,
     environments: Environments,
     tree: Tree,
+    sidebar_tab: SidebarTab,
+    history: HistoryPanel,
     notice: Option<String>,
     closing: Option<DocId>,
     deleting: Option<PathBuf>,
@@ -122,6 +128,8 @@ impl CornuApp {
             response_split: 0.55,
             environments: Environments::default(),
             tree: Tree::default(),
+            sidebar_tab: SidebarTab::default(),
+            history: HistoryPanel::default(),
             notice: None,
             closing: None,
             deleting: None,
@@ -144,7 +152,10 @@ impl CornuApp {
     }
 
     fn new_draft(&mut self) {
-        let request = Request::new(Method::Get, "");
+        self.open_draft(Request::new(Method::Get, ""));
+    }
+
+    fn open_draft(&mut self, request: Request) {
         self.add_document(
             None,
             Content::Request(Box::new(RequestDoc::new(request, false))),
@@ -211,10 +222,6 @@ impl CornuApp {
     fn discard(&mut self, id: DocId) {
         self.close(id);
         self.documents.retain(|doc| doc.id != id);
-    }
-
-    fn document_mut(&mut self, id: DocId) -> Option<&mut Document> {
-        self.documents.iter_mut().find(|doc| doc.id == id)
     }
 
     fn save(&mut self, id: DocId) {
@@ -386,13 +393,41 @@ impl CornuApp {
     fn collect_completed(&mut self) {
         let completed: Vec<_> = self.worker.completed().collect();
         for done in completed {
-            if let Some(Content::Request(doc)) =
-                self.document_mut(done.doc).map(|doc| &mut doc.content)
-            {
-                doc.state = match done.result {
-                    Ok(response) => SendState::Done(Box::new(ResponseView::new(response))),
-                    Err(error) => SendState::Failed(error.to_string()),
-                };
+            let Some(document) = self.documents.iter_mut().find(|doc| doc.id == done.doc) else {
+                continue;
+            };
+            let Content::Request(doc) = &mut document.content else {
+                continue;
+            };
+            // A late result for a cancelled request is dropped.
+            let SendState::Sending {
+                sent, timestamp, ..
+            } = &doc.state
+            else {
+                continue;
+            };
+            let outcome = match &done.result {
+                Ok(response) => Outcome::Response {
+                    status: response.status,
+                    elapsed_ms: response.elapsed.as_millis() as u64,
+                    size: response.size() as u64,
+                },
+                Err(error) => Outcome::Error {
+                    message: error.to_string(),
+                },
+            };
+            let entry = HistoryEntry {
+                timestamp: *timestamp,
+                request: (**sent).clone(),
+                source: document.path.clone(),
+                outcome,
+            };
+            doc.state = match done.result {
+                Ok(response) => SendState::Done(Box::new(ResponseView::new(response))),
+                Err(error) => SendState::Failed(error.to_string()),
+            };
+            if let Err(error) = self.project.history.push(entry) {
+                self.notice = Some(error.to_string());
             }
         }
     }
@@ -423,7 +458,20 @@ impl CornuApp {
             let path = egui::RichText::new(root.display().to_string()).weak();
             ui.add(egui::Label::new(path).truncate());
         }
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Collection, "Collection");
+            ui.selectable_value(&mut self.sidebar_tab, SidebarTab::History, "History");
+        });
         ui.separator();
+        if self.sidebar_tab == SidebarTab::History {
+            let action = egui::ScrollArea::vertical()
+                .show(ui, |ui| self.history.show(ui, &self.project.history))
+                .inner;
+            if let Some(action) = action {
+                self.apply_history(action);
+            }
+            return;
+        }
 
         let active = self
             .active
@@ -467,6 +515,28 @@ impl CornuApp {
         });
         for action in actions {
             self.apply(ui.ctx(), action);
+        }
+    }
+
+    fn apply_history(&mut self, action: HistoryAction) {
+        match action {
+            HistoryAction::Open(index) => {
+                if let Some(entry) = self.project.history.entries().get(index) {
+                    self.open_draft(entry.request.clone());
+                }
+            }
+            HistoryAction::OpenSource(path) => {
+                if self.project.workspace.find_request(&path).is_some() {
+                    self.open_request(&path);
+                } else {
+                    self.notice = Some(format!("{} no longer exists.", path.display()));
+                }
+            }
+            HistoryAction::Clear => {
+                if let Err(error) = self.project.history.clear() {
+                    self.notice = Some(error.to_string());
+                }
+            }
         }
     }
 
@@ -652,6 +722,8 @@ impl CornuApp {
             doc.state = SendState::Sending {
                 abort,
                 started: Instant::now(),
+                sent: Box::new(doc.request.clone()),
+                timestamp: format::unix_now(),
             };
         }
 
@@ -798,6 +870,13 @@ impl CornuApp {
             }
         }
     }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum SidebarTab {
+    #[default]
+    Collection,
+    History,
 }
 
 enum Close {

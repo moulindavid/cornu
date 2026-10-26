@@ -4,6 +4,7 @@ mod environments;
 mod folder;
 mod format;
 mod highlight;
+mod history;
 mod project;
 mod response;
 mod tree;
