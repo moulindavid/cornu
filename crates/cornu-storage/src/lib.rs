@@ -1,3 +1,4 @@
+mod edit;
 mod secrets;
 mod slug;
 
@@ -9,6 +10,7 @@ use cornu_core::{Auth, Environment, KeyValue, Request, Variables};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+pub use edit::moved_path;
 use secrets::Secrets;
 pub use slug::slugify;
 
@@ -230,11 +232,11 @@ impl Workspace {
         chain
     }
 
-    pub fn effective_auth(&self, entry: &RequestEntry) -> Auth {
-        let chain = self.folder_chain(&entry.path);
+    /// `auth` is the request's own auth, which may differ from the saved one while editing.
+    pub fn effective_auth(&self, path: &Path, auth: &Auth) -> Auth {
+        let chain = self.folder_chain(path);
         Auth::effective(
-            std::iter::once(&entry.request.auth)
-                .chain(chain.iter().rev().map(|folder| &folder.settings.auth)),
+            std::iter::once(auth).chain(chain.iter().rev().map(|folder| &folder.settings.auth)),
         )
     }
 

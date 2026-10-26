@@ -1,9 +1,12 @@
 mod app;
 mod editor;
 mod environments;
+mod folder;
 mod format;
 mod highlight;
+mod project;
 mod response;
+mod tree;
 mod widgets;
 mod worker;
 
@@ -20,6 +23,15 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "cornu",
         options,
-        Box::new(|_cc| Ok(Box::new(app::CornuApp::new(worker::Worker::new()?)))),
+        Box::new(|cc| {
+            let workspace = std::env::args_os()
+                .nth(1)
+                .map(std::path::PathBuf::from)
+                .or_else(|| app::last_workspace(cc.storage));
+            Ok(Box::new(app::CornuApp::new(
+                worker::Worker::new()?,
+                workspace,
+            )))
+        }),
     )
 }
