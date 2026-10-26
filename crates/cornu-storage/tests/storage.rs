@@ -263,7 +263,7 @@ fn auth_is_inherited_from_folders() {
         .find_request(Path::new("users/list-users.req.toml"))
         .unwrap();
     assert_eq!(
-        workspace.effective_auth(list),
+        workspace.effective_auth(&list.path, &list.request.auth),
         Auth::Bearer {
             token: "{{token}}".into()
         }
@@ -272,11 +272,15 @@ fn auth_is_inherited_from_folders() {
     let health = workspace
         .find_request(Path::new("health.req.toml"))
         .unwrap();
-    assert_eq!(workspace.effective_auth(health), Auth::None);
+    assert_eq!(
+        workspace.effective_auth(&health.path, &health.request.auth),
+        Auth::None
+    );
 
-    let mut opted_out = list.clone();
-    opted_out.request.auth = Auth::None;
-    assert_eq!(workspace.effective_auth(&opted_out), Auth::None);
+    assert_eq!(
+        workspace.effective_auth(&list.path, &Auth::None),
+        Auth::None
+    );
 }
 
 #[test]
@@ -297,4 +301,126 @@ fn variables_follow_postman_precedence() {
 
     let root_vars = workspace.variables(Path::new("health.req.toml"), None);
     assert_eq!(root_vars.get("resource"), None);
+}
+
+fn item_names(folder: &Folder) -> Vec<String> {
+    folder.items.iter().map(Item::entry_name).collect()
+}
+
+#[test]
+fn created_items_are_written_and_appended() {
+    let (dir, mut workspace) = workspace();
+    let folder = workspace.create_folder(Path::new(""), "Orders").unwrap();
+    let request = workspace
+        .create_request(
+            &folder,
+            Request::new(Method::Get, "/orders").with_name("List"),
+        )
+        .unwrap();
+    assert_eq!(request, PathBuf::from("orders/list.req.toml"));
+    assert!(dir.path().join(&request).is_file());
+
+    let loaded = Workspace::load(dir.path()).unwrap();
+    assert_eq!(loaded.tree, workspace.tree);
+}
+
+#[test]
+fn renaming_a_folder_moves_it_and_its_requests() {
+    let (dir, mut workspace) = workspace();
+    populate(&mut workspace);
+    let new_path = workspace.rename(Path::new("users"), "People").unwrap();
+    assert_eq!(new_path, PathBuf::from("people"));
+    assert!(!dir.path().join("users").exists());
+    assert!(dir.path().join("people/list-users.req.toml").is_file());
+    assert!(
+        workspace
+            .find_request(Path::new("people/list-users.req.toml"))
+            .is_some()
+    );
+
+    let loaded = Workspace::load(dir.path()).unwrap();
+    assert_eq!(loaded.tree, workspace.tree);
+    assert_eq!(item_names(&loaded.tree), ["people", "health"]);
+}
+
+#[test]
+fn renaming_to_the_same_slug_keeps_the_file() {
+    let (dir, mut workspace) = workspace();
+    populate(&mut workspace);
+    let path = Path::new("health.req.toml");
+    assert_eq!(workspace.rename(path, "HEALTH").unwrap(), path);
+    let loaded = Workspace::load(dir.path()).unwrap();
+    assert_eq!(loaded.find_request(path).unwrap().request.name, "HEALTH");
+}
+
+#[test]
+fn duplicating_places_the_copy_after_the_original() {
+    let (dir, mut workspace) = workspace();
+    populate(&mut workspace);
+    let copy = workspace.duplicate(Path::new("users")).unwrap();
+    assert_eq!(copy, PathBuf::from("users-copy"));
+    assert!(dir.path().join("users-copy/create-user.req.toml").is_file());
+
+    let request = workspace.duplicate(Path::new("health.req.toml")).unwrap();
+    assert_eq!(
+        workspace.find_request(&request).unwrap().request.name,
+        "Health copy"
+    );
+
+    let loaded = Workspace::load(dir.path()).unwrap();
+    assert_eq!(loaded.tree, workspace.tree);
+    assert_eq!(
+        item_names(&loaded.tree),
+        ["users", "users-copy", "health", "health-copy"]
+    );
+}
+
+#[test]
+fn deleting_removes_files_and_order_entries() {
+    let (dir, mut workspace) = workspace();
+    populate(&mut workspace);
+    workspace.delete(Path::new("users")).unwrap();
+    workspace.delete(Path::new("health.req.toml")).unwrap();
+    assert!(!dir.path().join("users").exists());
+    assert!(!dir.path().join("health.req.toml").exists());
+    assert!(!read(dir.path(), CONFIG_FILE).contains("users"));
+    assert!(Workspace::load(dir.path()).unwrap().tree.items.is_empty());
+}
+
+#[test]
+fn updates_are_saved_in_place() {
+    let (dir, mut workspace) = workspace();
+    populate(&mut workspace);
+    let path = Path::new("users/list-users.req.toml");
+    let mut request = workspace.find_request(path).unwrap().request.clone();
+    request.url = "{{base_url}}/v2/users".into();
+    workspace.update_request(path, request).unwrap();
+
+    let mut settings = workspace
+        .folder(Path::new("users"))
+        .unwrap()
+        .settings
+        .clone();
+    settings.auth = Auth::None;
+    workspace
+        .update_folder(Path::new("users"), settings)
+        .unwrap();
+
+    let loaded = Workspace::load(dir.path()).unwrap();
+    assert_eq!(loaded.tree, workspace.tree);
+    assert!(read(dir.path(), "users/list-users.req.toml").contains("/v2/users"));
+}
+
+#[test]
+fn environments_can_be_created_and_deleted() {
+    let (dir, mut workspace) = workspace();
+    populate(&mut workspace);
+    let index = workspace.create_environment("Prod").unwrap();
+    assert!(dir.path().join("environments/prod.toml").is_file());
+
+    workspace.delete_environment(index).unwrap();
+    workspace.delete_environment(0).unwrap();
+    assert!(!dir.path().join("environments/dev.toml").exists());
+    assert!(!read(dir.path(), ".cornu/secrets.toml").contains("dev-token"));
+    assert!(Workspace::load(dir.path()).unwrap().environments.is_empty());
 }

@@ -13,7 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 cornu-core.workspace = true
-eframe.workspace = true
+cornu-storage.workspace = true
+eframe = { workspace = true, features = ["persistence"] }
 rfd.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }

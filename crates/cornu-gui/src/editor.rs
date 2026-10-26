@@ -340,7 +340,7 @@ fn auth_kind(auth: &Auth) -> AuthKind {
     }
 }
 
-fn auth_editor(ui: &mut egui::Ui, auth: &mut Auth) {
+pub fn auth_editor(ui: &mut egui::Ui, auth: &mut Auth) {
     let current = auth_kind(auth);
     egui::ComboBox::from_label("Type")
         .selected_text(current.label())

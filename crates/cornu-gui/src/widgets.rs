@@ -2,16 +2,48 @@ use cornu_core::{KeyValue, Segment, Variables, is_dynamic, segments};
 use eframe::egui;
 
 pub fn key_value_table(ui: &mut egui::Ui, id: egui::Id, rows: &mut Vec<KeyValue>) {
-    let widths = column_widths(ui.available_width());
+    table(ui, id, rows, false);
+}
+
+/// A key/value table where each value can be marked secret (kept out of git, masked here).
+pub fn variable_table(ui: &mut egui::Ui, id: egui::Id, rows: &mut Vec<KeyValue>) {
+    table(ui, id, rows, true);
+}
+
+fn table(ui: &mut egui::Ui, id: egui::Id, rows: &mut Vec<KeyValue>, secrets: bool) {
+    let mut widths = column_widths(ui.available_width());
+    if secrets {
+        widths.1 = (widths.1 - 60.0).max(160.0);
+    }
     let mut remove = None;
     egui::Grid::new(id)
-        .num_columns(4)
+        .num_columns(if secrets { 5 } else { 4 })
         .striped(true)
         .spacing([6.0, 4.0])
         .show(ui, |ui| {
             for (index, row) in rows.iter_mut().enumerate() {
                 ui.checkbox(&mut row.enabled, "");
-                key_value_fields(ui, id, index, widths, &mut row.key, &mut row.value);
+                let fields = Fields {
+                    id,
+                    index,
+                    widths,
+                    password: row.secret,
+                };
+                fields.show(ui, &mut row.key, &mut row.value);
+                if secrets {
+                    let hint = if row.secret {
+                        "Secret: stored in .cornu/, outside git"
+                    } else {
+                        "Mark as secret"
+                    };
+                    if ui
+                        .selectable_label(row.secret, "🔒")
+                        .on_hover_text(hint)
+                        .clicked()
+                    {
+                        row.secret = !row.secret;
+                    }
+                }
                 if ui.small_button("🗑").on_hover_text("Remove").clicked() {
                     remove = Some(index);
                 }
@@ -21,7 +53,13 @@ pub fn key_value_table(ui: &mut egui::Ui, id: egui::Id, rows: &mut Vec<KeyValue>
             // The empty trailing row shares ids with the row it becomes, so focus survives.
             let (mut key, mut value) = (String::new(), String::new());
             ui.label("");
-            if key_value_fields(ui, id, rows.len(), widths, &mut key, &mut value) {
+            let fields = Fields {
+                id,
+                index: rows.len(),
+                widths,
+                password: false,
+            };
+            if fields.show(ui, &mut key, &mut value) {
                 rows.push(KeyValue::new(key, value));
             }
             ui.end_row();
@@ -31,28 +69,31 @@ pub fn key_value_table(ui: &mut egui::Ui, id: egui::Id, rows: &mut Vec<KeyValue>
     }
 }
 
-fn key_value_fields(
-    ui: &mut egui::Ui,
+struct Fields {
     id: egui::Id,
     index: usize,
-    (key_width, value_width): (f32, f32),
-    key: &mut String,
-    value: &mut String,
-) -> bool {
-    let height = ui.spacing().interact_size.y;
-    let key = ui.add_sized(
-        [key_width, height],
-        egui::TextEdit::singleline(key)
-            .id(id.with((index, "key")))
-            .hint_text("Key"),
-    );
-    let value = ui.add_sized(
-        [value_width, height],
-        egui::TextEdit::singleline(value)
-            .id(id.with((index, "value")))
-            .hint_text("Value"),
-    );
-    key.changed() || value.changed()
+    widths: (f32, f32),
+    password: bool,
+}
+
+impl Fields {
+    fn show(self, ui: &mut egui::Ui, key: &mut String, value: &mut String) -> bool {
+        let height = ui.spacing().interact_size.y;
+        let key = ui.add_sized(
+            [self.widths.0, height],
+            egui::TextEdit::singleline(key)
+                .id(self.id.with((self.index, "key")))
+                .hint_text("Key"),
+        );
+        let value = ui.add_sized(
+            [self.widths.1, height],
+            egui::TextEdit::singleline(value)
+                .id(self.id.with((self.index, "value")))
+                .hint_text("Value")
+                .password(self.password),
+        );
+        key.changed() || value.changed()
+    }
 }
 
 /// Grid cells only offer last frame's column width, so fields must be sized explicitly.

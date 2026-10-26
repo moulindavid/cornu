@@ -1,17 +1,25 @@
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use cornu_core::{Method, Request};
+use cornu_storage::moved_path;
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 use tokio::task::AbortHandle;
 
 use crate::editor::{self, EditorState};
 use crate::environments::Environments;
+use crate::folder::{FolderTab, folder_view};
 use crate::format;
+use crate::project::Project;
 use crate::response::ResponseView;
+use crate::tree::{Tree, TreeAction, method_color};
 use crate::widgets::{variable_field, vertical_split};
 use crate::worker::{DocId, Worker};
 
 const SEND_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
+const SAVE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
+const WORKSPACE_KEY: &str = "workspace";
+const NEW_REQUEST: &str = "New request";
 
 enum SendState {
     Idle,
@@ -23,15 +31,32 @@ enum SendState {
     Failed(String),
 }
 
-struct Document {
-    id: DocId,
+struct RequestDoc {
     request: Request,
+    /// What is on disk; `None` for a draft that was never saved.
+    saved: Option<Request>,
     state: SendState,
     editor: EditorState,
     unresolved: Vec<String>,
 }
 
-impl Document {
+impl RequestDoc {
+    fn new(request: Request, saved: bool) -> Self {
+        Self {
+            saved: saved.then(|| request.clone()),
+            request,
+            state: SendState::Idle,
+            editor: EditorState::default(),
+            unresolved: Vec::new(),
+        }
+    }
+
+    fn is_modified(&self) -> bool {
+        self.saved
+            .as_ref()
+            .is_some_and(|saved| *saved != self.request)
+    }
+
     fn title(&self) -> &str {
         if self.request.name.is_empty() {
             "Untitled request"
@@ -41,42 +66,89 @@ impl Document {
     }
 }
 
+enum Content {
+    Request(Box<RequestDoc>),
+    Folder(FolderTab),
+}
+
+struct Document {
+    id: DocId,
+    /// Relative to the workspace root; `None` for drafts.
+    path: Option<PathBuf>,
+    content: Content,
+}
+
+impl Document {
+    fn request(&self) -> Option<&RequestDoc> {
+        match &self.content {
+            Content::Request(doc) => Some(doc),
+            Content::Folder(_) => None,
+        }
+    }
+
+    fn is_modified(&self) -> bool {
+        self.request().is_some_and(RequestDoc::is_modified)
+    }
+
+    fn is_draft(&self) -> bool {
+        self.path.is_none()
+    }
+}
+
 pub struct CornuApp {
     worker: Worker,
+    project: Project,
     documents: Vec<Document>,
     open_tabs: Vec<DocId>,
     active: Option<DocId>,
     next_id: DocId,
     response_split: f32,
     environments: Environments,
+    tree: Tree,
+    notice: Option<String>,
+    closing: Option<DocId>,
+    deleting: Option<PathBuf>,
 }
 
 impl CornuApp {
-    pub fn new(worker: Worker) -> Self {
+    pub fn new(worker: Worker, workspace: Option<PathBuf>) -> Self {
         let mut app = Self {
             worker,
+            project: Project::scratch(),
             documents: Vec::new(),
             open_tabs: Vec::new(),
             active: None,
             next_id: 0,
             response_split: 0.55,
             environments: Environments::default(),
+            tree: Tree::default(),
+            notice: None,
+            closing: None,
+            deleting: None,
         };
-        app.new_request();
+        if let Some(root) = workspace {
+            app.switch_workspace(Project::open(&root));
+        }
+        if app.documents.is_empty() && !app.project.is_on_disk() {
+            app.new_draft();
+        }
         app
     }
 
-    fn new_request(&mut self) {
+    fn add_document(&mut self, path: Option<PathBuf>, content: Content) -> DocId {
         let id = self.next_id;
         self.next_id += 1;
-        self.documents.push(Document {
-            id,
-            request: Request::new(Method::Get, ""),
-            state: SendState::Idle,
-            editor: EditorState::default(),
-            unresolved: Vec::new(),
-        });
+        self.documents.push(Document { id, path, content });
         self.open(id);
+        id
+    }
+
+    fn new_draft(&mut self) {
+        let request = Request::new(Method::Get, "");
+        self.add_document(
+            None,
+            Content::Request(Box::new(RequestDoc::new(request, false))),
+        );
     }
 
     fn open(&mut self, id: DocId) {
@@ -86,27 +158,237 @@ impl CornuApp {
         self.active = Some(id);
     }
 
-    fn close(&mut self, id: DocId) {
-        let Some(index) = self.open_tabs.iter().position(|tab| *tab == id) else {
-            return;
-        };
-        self.open_tabs.remove(index);
-        if self.active == Some(id) {
-            self.active = self
-                .open_tabs
-                .get(index.min(self.open_tabs.len().saturating_sub(1)))
-                .copied();
+    fn find_by_path(&self, path: &Path, folder: bool) -> Option<DocId> {
+        self.documents
+            .iter()
+            .find(|doc| {
+                doc.path.as_deref() == Some(path)
+                    && matches!(doc.content, Content::Folder(_)) == folder
+            })
+            .map(|doc| doc.id)
+    }
+
+    fn open_request(&mut self, path: &Path) {
+        if let Some(id) = self.find_by_path(path, false) {
+            return self.open(id);
         }
+        if let Some(entry) = self.project.workspace.find_request(path) {
+            let doc = RequestDoc::new(entry.request.clone(), true);
+            self.add_document(Some(path.to_owned()), Content::Request(Box::new(doc)));
+        }
+    }
+
+    fn open_folder(&mut self, path: &Path) {
+        match self.find_by_path(path, true) {
+            Some(id) => self.open(id),
+            None => {
+                self.add_document(Some(path.to_owned()), Content::Folder(FolderTab::default()));
+            }
+        }
+    }
+
+    fn request_close(&mut self, id: DocId) {
+        match self.documents.iter().find(|doc| doc.id == id) {
+            Some(doc) if doc.is_modified() => self.closing = Some(id),
+            _ => self.close(id),
+        }
+    }
+
+    /// Drafts stay listed in the sidebar; saved documents can be reopened from the tree.
+    fn close(&mut self, id: DocId) {
+        if let Some(index) = self.open_tabs.iter().position(|tab| *tab == id) {
+            self.open_tabs.remove(index);
+            if self.active == Some(id) {
+                self.active = self
+                    .open_tabs
+                    .get(index.min(self.open_tabs.len().saturating_sub(1)))
+                    .copied();
+            }
+        }
+        self.documents.retain(|doc| doc.id != id || doc.is_draft());
+    }
+
+    fn discard(&mut self, id: DocId) {
+        self.close(id);
+        self.documents.retain(|doc| doc.id != id);
     }
 
     fn document_mut(&mut self, id: DocId) -> Option<&mut Document> {
         self.documents.iter_mut().find(|doc| doc.id == id)
     }
 
+    fn save(&mut self, id: DocId) {
+        if let Err(error) = self.try_save(id) {
+            self.notice = Some(error);
+        }
+    }
+
+    fn try_save(&mut self, id: DocId) -> Result<(), String> {
+        let on_disk = self.project.is_on_disk();
+        let Some(doc) = self.documents.iter_mut().find(|doc| doc.id == id) else {
+            return Ok(());
+        };
+        let Content::Request(request_doc) = &mut doc.content else {
+            return Ok(());
+        };
+        let workspace = &mut self.project.workspace;
+        match &doc.path {
+            Some(path) => {
+                workspace
+                    .update_request(path, request_doc.request.clone())
+                    .map_err(|error| error.to_string())?;
+            }
+            None if on_disk => {
+                let unnamed = request_doc.request.name.trim().is_empty();
+                if unnamed {
+                    request_doc.request.name = NEW_REQUEST.into();
+                }
+                let path = workspace
+                    .create_request(Path::new(""), request_doc.request.clone())
+                    .map_err(|error| error.to_string())?;
+                if unnamed {
+                    self.tree.start_rename(path.clone(), NEW_REQUEST);
+                }
+                doc.path = Some(path);
+            }
+            None => return Err("Open or create a workspace to save requests.".into()),
+        }
+        request_doc.saved = Some(request_doc.request.clone());
+        Ok(())
+    }
+
+    fn pick_workspace(&mut self, create: bool) {
+        let Some(root) = rfd::FileDialog::new().pick_folder() else {
+            return;
+        };
+        let project = if create {
+            Project::create(&root)
+        } else {
+            Project::open(&root)
+        };
+        self.switch_workspace(project);
+    }
+
+    fn close_workspace(&mut self) {
+        self.switch_workspace(Ok(Project::scratch()));
+    }
+
+    fn switch_workspace(&mut self, project: Result<Project, cornu_storage::StorageError>) {
+        if self.documents.iter().any(Document::is_modified) {
+            self.notice =
+                Some("Save or close modified requests before switching workspace.".into());
+            return;
+        }
+        let project = match project {
+            Ok(project) => project,
+            Err(error) => {
+                self.notice = Some(error.to_string());
+                return;
+            }
+        };
+        let saved: Vec<_> = self
+            .documents
+            .iter()
+            .filter(|doc| !doc.is_draft())
+            .map(|doc| doc.id)
+            .collect();
+        for id in saved {
+            self.discard(id);
+        }
+        self.notice = match project.workspace.problems.as_slice() {
+            [] => None,
+            [problem] => Some(format!("Could not read {problem}")),
+            [first, rest @ ..] => Some(format!(
+                "Could not read {first} (and {} more files)",
+                rest.len()
+            )),
+        };
+        self.project = project;
+        self.environments.reset();
+        self.tree = Tree::default();
+    }
+
+    fn apply(&mut self, ctx: &egui::Context, action: TreeAction) {
+        if let Err(error) = self.try_apply(ctx, action) {
+            self.notice = Some(error.to_string());
+        }
+    }
+
+    fn try_apply(
+        &mut self,
+        ctx: &egui::Context,
+        action: TreeAction,
+    ) -> Result<(), cornu_storage::StorageError> {
+        let workspace = &mut self.project.workspace;
+        match action {
+            TreeAction::OpenRequest(path) => self.open_request(&path),
+            TreeAction::OpenFolder(path) => self.open_folder(&path),
+            TreeAction::NewRequest(parent) => {
+                let request = Request::new(Method::Get, "").with_name(NEW_REQUEST);
+                let path = workspace.create_request(&parent, request)?;
+                Tree::expand(ctx, &parent);
+                self.tree.start_rename(path.clone(), NEW_REQUEST);
+                self.open_request(&path);
+            }
+            TreeAction::NewFolder(parent) => {
+                let path = workspace.create_folder(&parent, "New folder")?;
+                Tree::expand(ctx, &parent);
+                self.tree.start_rename(path, "New folder");
+            }
+            TreeAction::Rename(path, name) => {
+                let new_path = workspace.rename(&path, &name)?;
+                for doc in &mut self.documents {
+                    let Some(moved) = doc
+                        .path
+                        .as_deref()
+                        .and_then(|p| moved_path(p, &path, &new_path))
+                    else {
+                        continue;
+                    };
+                    if let Content::Request(request) = &mut doc.content
+                        && moved == new_path
+                    {
+                        request.request.name.clone_from(&name);
+                        if let Some(saved) = &mut request.saved {
+                            saved.name.clone_from(&name);
+                        }
+                    }
+                    doc.path = Some(moved);
+                }
+            }
+            TreeAction::Duplicate(path) => {
+                let copy = workspace.duplicate(&path)?;
+                if workspace.find_request(&copy).is_some() {
+                    self.open_request(&copy);
+                }
+            }
+            TreeAction::Delete(path) => self.deleting = Some(path),
+        }
+        Ok(())
+    }
+
+    fn delete(&mut self, path: &Path) {
+        if let Err(error) = self.project.workspace.delete(path) {
+            self.notice = Some(error.to_string());
+            return;
+        }
+        let removed: Vec<_> = self
+            .documents
+            .iter()
+            .filter(|doc| doc.path.as_deref().is_some_and(|p| p.starts_with(path)))
+            .map(|doc| doc.id)
+            .collect();
+        for id in removed {
+            self.discard(id);
+        }
+    }
+
     fn collect_completed(&mut self) {
         let completed: Vec<_> = self.worker.completed().collect();
         for done in completed {
-            if let Some(doc) = self.document_mut(done.doc) {
+            if let Some(Content::Request(doc)) =
+                self.document_mut(done.doc).map(|doc| &mut doc.content)
+            {
                 doc.state = match done.result {
                     Ok(response) => SendState::Done(Box::new(ResponseView::new(response))),
                     Err(error) => SendState::Failed(error.to_string()),
@@ -117,26 +399,145 @@ impl CornuApp {
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("Requests");
+            let title = if self.project.is_on_disk() {
+                self.project.name()
+            } else {
+                "No workspace"
+            };
+            ui.heading(title);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("+ New").clicked() {
-                    self.new_request();
+                ui.menu_button("☰", |ui| {
+                    if ui.button("Open workspace…").clicked() {
+                        self.pick_workspace(false);
+                    }
+                    if ui.button("New workspace…").clicked() {
+                        self.pick_workspace(true);
+                    }
+                    if self.project.is_on_disk() && ui.button("Close workspace").clicked() {
+                        self.close_workspace();
+                    }
+                });
+            });
+        });
+        if let Some(root) = self.project.root() {
+            let path = egui::RichText::new(root.display().to_string()).weak();
+            ui.add(egui::Label::new(path).truncate());
+        }
+        ui.separator();
+
+        let active = self
+            .active
+            .and_then(|id| self.documents.iter().find(|doc| doc.id == id))
+            .and_then(|doc| doc.path.clone());
+        let mut actions = Vec::new();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            if self.project.is_on_disk() {
+                ui.horizontal(|ui| {
+                    if ui.button("+ Request").clicked() {
+                        actions.push(TreeAction::NewRequest(PathBuf::new()));
+                    }
+                    if ui.button("+ Folder").clicked() {
+                        actions.push(TreeAction::NewFolder(PathBuf::new()));
+                    }
+                    if ui
+                        .button("⚙")
+                        .on_hover_text("Workspace auth and variables")
+                        .clicked()
+                    {
+                        actions.push(TreeAction::OpenFolder(PathBuf::new()));
+                    }
+                });
+                ui.add_space(4.0);
+                let tree = &self.project.workspace.tree;
+                actions.extend(self.tree.show(ui, tree, active.as_deref()));
+                ui.add_space(8.0);
+            } else {
+                ui.label("Requests are kept as plain files you can commit to git.");
+                ui.horizontal(|ui| {
+                    if ui.button("Open workspace…").clicked() {
+                        self.pick_workspace(false);
+                    }
+                    if ui.button("New workspace…").clicked() {
+                        self.pick_workspace(true);
+                    }
+                });
+                ui.add_space(8.0);
+            }
+            self.drafts(ui);
+        });
+        for action in actions {
+            self.apply(ui.ctx(), action);
+        }
+    }
+
+    fn drafts(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.strong("Drafts");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("+").on_hover_text("New draft").clicked() {
+                    self.new_draft();
                 }
             });
         });
-        ui.separator();
         let mut clicked = None;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for doc in &self.documents {
-                let selected = self.active == Some(doc.id);
-                let label = format!("{}  {}", doc.request.method, doc.title());
-                if ui.selectable_label(selected, label).clicked() {
-                    clicked = Some(doc.id);
-                }
+        let mut removed = None;
+        for doc in self.documents.iter().filter(|doc| doc.is_draft()) {
+            let Some(request) = doc.request() else {
+                continue;
+            };
+            let selected = self.active == Some(doc.id);
+            let mut job = egui::text::LayoutJob::default();
+            job.append(
+                &format!("{} ", request.request.method),
+                0.0,
+                egui::TextFormat::simple(
+                    egui::FontId::monospace(10.0),
+                    method_color(&request.request.method, ui.visuals()),
+                ),
+            );
+            job.append(
+                request.title(),
+                0.0,
+                egui::TextFormat::simple(
+                    egui::TextStyle::Button.resolve(ui.style()),
+                    ui.visuals().text_color(),
+                ),
+            );
+            let label = ui.selectable_label(selected, job);
+            if label.clicked() {
+                clicked = Some(doc.id);
             }
-        });
+            label.context_menu(|ui| {
+                if ui.button("Delete draft").clicked() {
+                    removed = Some(doc.id);
+                }
+            });
+        }
         if let Some(id) = clicked {
             self.open(id);
+        }
+        if let Some(id) = removed {
+            self.discard(id);
+        }
+    }
+
+    fn tab_title(&self, doc: &Document) -> String {
+        match &doc.content {
+            Content::Request(request) if request.is_modified() => format!("● {}", request.title()),
+            Content::Request(request) => request.title().to_owned(),
+            Content::Folder(_) => {
+                let path = doc.path.as_deref().unwrap_or(Path::new(""));
+                let name = self
+                    .project
+                    .workspace
+                    .folder(path)
+                    .map_or("Folder", |folder| folder.settings.name.as_str());
+                if path.as_os_str().is_empty() {
+                    format!("⚙ {name}")
+                } else {
+                    format!("📁 {name}")
+                }
+            }
         }
     }
 
@@ -149,7 +550,7 @@ impl CornuApp {
                     let Some(doc) = self.documents.iter().find(|doc| doc.id == id) else {
                         continue;
                     };
-                    let tab = ui.selectable_label(self.active == Some(id), doc.title());
+                    let tab = ui.selectable_label(self.active == Some(id), self.tab_title(doc));
                     if tab.clicked() {
                         activate = Some(id);
                     }
@@ -164,20 +565,42 @@ impl CornuApp {
             self.active = Some(id);
         }
         if let Some(id) = close {
-            self.close(id);
+            self.request_close(id);
+        }
+    }
+
+    fn document_view(&mut self, ui: &mut egui::Ui, id: DocId) {
+        let Some(doc) = self.documents.iter_mut().find(|doc| doc.id == id) else {
+            return;
+        };
+        match &mut doc.content {
+            Content::Folder(tab) => {
+                let path = doc.path.clone().unwrap_or_default();
+                if let Some(error) = folder_view(ui, &mut self.project, &path, tab) {
+                    self.notice = Some(error);
+                }
+            }
+            Content::Request(_) => self.request_view(ui, id),
         }
     }
 
     fn request_view(&mut self, ui: &mut egui::Ui, id: DocId) {
         let ctx = ui.ctx().clone();
         let send_pressed = ui.input_mut(|input| input.consume_shortcut(&SEND_SHORTCUT));
-        let variables = self.environments.variables();
         let Some(doc) = self.documents.iter_mut().find(|doc| doc.id == id) else {
+            return;
+        };
+        let variables = self
+            .project
+            .variables(doc.path.as_deref(), self.environments.active);
+        let path = doc.path.clone();
+        let Content::Request(doc) = &mut doc.content else {
             return;
         };
 
         let mut send = send_pressed;
         let mut cancel = false;
+        let mut save = false;
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt(("method", id))
                 .selected_text(doc.request.method.as_str())
@@ -191,6 +614,13 @@ impl CornuApp {
             let sending = matches!(doc.state, SendState::Sending { .. });
             let button = if sending { "Cancel" } else { "Send" };
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let save_button = ui.add_enabled(
+                    doc.saved.is_none() || doc.is_modified(),
+                    egui::Button::new("Save"),
+                );
+                if save_button.on_hover_text("Ctrl+S").clicked() {
+                    save = true;
+                }
                 if ui.button(button).clicked() {
                     if sending {
                         cancel = true;
@@ -214,7 +644,9 @@ impl CornuApp {
             abort.abort();
             doc.state = SendState::Failed("Cancelled".into());
         } else if send && !matches!(doc.state, SendState::Sending { .. }) {
-            let resolved = doc.request.resolve(&variables);
+            let mut request = doc.request.clone();
+            request.auth = self.project.effective_auth(path.as_deref(), &request.auth);
+            let resolved = request.resolve(&variables);
             doc.unresolved = resolved.unresolved;
             let abort = self.worker.send(&ctx, id, resolved.request);
             doc.state = SendState::Sending {
@@ -242,7 +674,136 @@ impl CornuApp {
                 response_view(ui, &mut doc.state);
             },
         );
+        if save {
+            self.save(id);
+        }
     }
+
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| match &self.notice {
+            Some(notice) => {
+                ui.colored_label(ui.visuals().error_fg_color, notice);
+                if ui.small_button("×").on_hover_text("Dismiss").clicked() {
+                    self.notice = None;
+                }
+            }
+            None => {
+                let modified = self
+                    .documents
+                    .iter()
+                    .filter(|doc| doc.is_modified())
+                    .count();
+                if modified > 0 {
+                    ui.weak(format!("{modified} unsaved request(s)"));
+                }
+            }
+        });
+    }
+
+    fn dialogs(&mut self, ctx: &egui::Context) {
+        if let Some(id) = self.closing {
+            let title = self
+                .documents
+                .iter()
+                .find(|doc| doc.id == id)
+                .map(|doc| self.tab_title(doc))
+                .unwrap_or_default();
+            let mut choice = None;
+            let modal = egui::Modal::new(egui::Id::unique("close-modified")).show(ctx, |ui| {
+                ui.set_max_width(360.0);
+                ui.heading("Unsaved changes");
+                ui.label(format!(
+                    "Save the changes to {}?",
+                    title.trim_start_matches("● ")
+                ));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        choice = Some(Close::Save);
+                    }
+                    if ui.button("Discard").clicked() {
+                        choice = Some(Close::Discard);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        choice = Some(Close::Cancel);
+                    }
+                });
+            });
+            if modal.should_close() {
+                choice = Some(Close::Cancel);
+            }
+            match choice {
+                Some(Close::Save) => {
+                    self.save(id);
+                    if !self
+                        .documents
+                        .iter()
+                        .any(|doc| doc.id == id && doc.is_modified())
+                    {
+                        self.discard(id);
+                    }
+                    self.closing = None;
+                }
+                Some(Close::Discard) => {
+                    self.discard(id);
+                    self.closing = None;
+                }
+                Some(Close::Cancel) => self.closing = None,
+                None => {}
+            }
+        }
+
+        if let Some(path) = self.deleting.clone() {
+            let workspace = &self.project.workspace;
+            let (kind, name) = match workspace.folder(&path) {
+                Some(folder) => ("folder", folder.settings.name.clone()),
+                None => (
+                    "request",
+                    workspace
+                        .find_request(&path)
+                        .map(|entry| entry.request.name.clone())
+                        .unwrap_or_default(),
+                ),
+            };
+            let mut confirmed = None;
+            let modal = egui::Modal::new(egui::Id::unique("confirm-delete")).show(ctx, |ui| {
+                ui.set_max_width(360.0);
+                ui.heading(format!("Delete {kind}?"));
+                if kind == "folder" {
+                    ui.label(format!(
+                        "\"{name}\" and everything inside it will be deleted."
+                    ));
+                } else {
+                    ui.label(format!("\"{name}\" will be deleted."));
+                }
+                ui.weak(path.display().to_string());
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Delete").clicked() {
+                        confirmed = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        confirmed = Some(false);
+                    }
+                });
+            });
+            if modal.should_close() {
+                confirmed = Some(false);
+            }
+            if let Some(confirmed) = confirmed {
+                self.deleting = None;
+                if confirmed {
+                    self.delete(&path);
+                }
+            }
+        }
+    }
+}
+
+enum Close {
+    Save,
+    Discard,
+    Cancel,
 }
 
 fn response_view(ui: &mut egui::Ui, state: &mut SendState) {
@@ -267,11 +828,16 @@ fn response_view(ui: &mut egui::Ui, state: &mut SendState) {
 impl eframe::App for CornuApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.collect_completed();
+        if ui.input_mut(|input| input.consume_shortcut(&SAVE_SHORTCUT))
+            && let Some(id) = self.active
+        {
+            self.save(id);
+        }
 
         egui::Panel::left("sidebar")
             .resizable(true)
-            .default_size(240.0)
-            .min_size(160.0)
+            .default_size(260.0)
+            .min_size(180.0)
             .show(ui, |ui| self.sidebar(ui));
 
         egui::Panel::top("tabs").show(ui, |ui| {
@@ -281,18 +847,35 @@ impl eframe::App for CornuApp {
                 let height = ui.spacing().interact_size.y;
                 ui.allocate_ui(egui::vec2(tabs_width, height), |ui| self.tab_bar(ui));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    self.environments.selector(ui);
+                    self.environments.selector(ui, &self.project);
                 });
             });
         });
 
+        egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+
         egui::CentralPanel::default().show(ui, |ui| match self.active {
-            Some(id) => self.request_view(ui, id),
+            Some(id) => self.document_view(ui, id),
             None => {
                 ui.centered_and_justified(|ui| ui.weak("No request open"));
             }
         });
 
-        self.environments.manager(ui.ctx());
+        if let Some(error) = self.environments.manager(ui.ctx(), &mut self.project) {
+            self.notice = Some(error);
+        }
+        self.dialogs(ui.ctx());
     }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        let root = self.project.root().map(|root| root.display().to_string());
+        storage.set_string(WORKSPACE_KEY, root.unwrap_or_default());
+    }
+}
+
+pub fn last_workspace(storage: Option<&dyn eframe::Storage>) -> Option<PathBuf> {
+    storage
+        .and_then(|storage| storage.get_string(WORKSPACE_KEY))
+        .filter(|root| !root.is_empty())
+        .map(PathBuf::from)
 }
