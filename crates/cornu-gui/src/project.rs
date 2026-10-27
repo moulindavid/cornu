@@ -103,13 +103,13 @@ impl Project {
         }
     }
 
-    pub fn add_environment(&mut self, name: &str) -> Result<usize, StorageError> {
+    pub fn add_environment(&mut self, environment: Environment) -> Result<usize, StorageError> {
         if self.on_disk {
-            return self.workspace.create_environment(name);
+            return self.workspace.create_environment(environment);
         }
         self.workspace.environments.push(EnvironmentEntry {
             path: PathBuf::new(),
-            environment: Environment::new(name),
+            environment,
         });
         Ok(self.workspace.environments.len() - 1)
     }

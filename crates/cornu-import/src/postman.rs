@@ -1,6 +1,8 @@
 //! Postman collection format v2.0 / v2.1: <https://schema.postman.com/collection/json/v2.1.0/draft-07/docs/index.html>
 
-use cornu_core::{ApiKeyLocation, Auth, Body, KeyValue, Method, MultipartPart, Request};
+use cornu_core::{
+    ApiKeyLocation, Auth, Body, Environment, KeyValue, Method, MultipartPart, Request,
+};
 use serde_json::{Map, Value};
 
 use crate::{Collection, ImportError, ImportedFolder, ImportedItem};
@@ -31,6 +33,43 @@ pub fn parse_collection(json: &str) -> Result<Collection, ImportError> {
         root,
         warnings: importer.finish(),
     })
+}
+
+/// Also accepts globals exports, which share the environment format.
+pub fn parse_environment(json: &str) -> Result<Environment, ImportError> {
+    let value: Value = serde_json::from_str(json)?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| ImportError::Unsupported("not a Postman environment".into()))?;
+    let object = object
+        .get("environment")
+        .and_then(Value::as_object)
+        .unwrap_or(object);
+    if object.contains_key("info") {
+        return Err(ImportError::Unsupported(
+            "this is a Postman collection, not an environment".into(),
+        ));
+    }
+    let Some(values) = object.get("values").and_then(Value::as_array) else {
+        return Err(ImportError::Unsupported(
+            "not a Postman environment (no \"values\" list)".into(),
+        ));
+    };
+
+    let mut environment = Environment::new(
+        string(object.get("name")).unwrap_or_else(|| "Imported environment".into()),
+    );
+    environment.variables = values
+        .iter()
+        .filter_map(|row| {
+            let key = string(row.get("key"))?;
+            let mut kv = KeyValue::new(key, string(row.get("value")).unwrap_or_default());
+            kv.enabled = row.get("enabled").and_then(Value::as_bool) != Some(false);
+            kv.secret = row.get("type").and_then(Value::as_str) == Some("secret");
+            Some(kv)
+        })
+        .collect();
+    Ok(environment)
 }
 
 #[derive(Default)]

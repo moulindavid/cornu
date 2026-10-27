@@ -1,0 +1,14 @@
+{
+  "id": "5d0c8f3a-6c1e-4d58-9a4f-1f3e2b7c9d10",
+  "name": "Pet Store Dev",
+  "values": [
+    { "key": "base_url", "value": "https://dev.petstore.example/v2", "type": "default", "enabled": true },
+    { "key": "token", "value": "dev-s3cret", "type": "secret", "enabled": true },
+    { "key": "retries", "value": 3, "type": "default", "enabled": true },
+    { "key": "legacy_host", "value": "old.petstore.example", "type": "default", "enabled": false },
+    { "value": "row without a key" }
+  ],
+  "_postman_variable_scope": "environment",
+  "_postman_exported_at": "2026-10-20T09:14:02.511Z",
+  "_postman_exported_using": "Postman/11.18.0"
+}

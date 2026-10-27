@@ -313,6 +313,35 @@ impl CornuApp {
         );
     }
 
+    fn import_postman_environments(&mut self) {
+        let Some(files) = rfd::FileDialog::new()
+            .set_title("Import Postman environments")
+            .add_filter("Postman environment", &["json"])
+            .pick_files()
+        else {
+            return;
+        };
+        let mut imported = Vec::new();
+        let mut failures = Vec::new();
+        for file in files {
+            match import_postman_environment(&file, &mut self.project) {
+                Ok(name) => imported.push(name),
+                Err(error) => failures.push(format!("{}: {error}", file.display())),
+            }
+        }
+        let message = match (imported.as_slice(), failures.len()) {
+            ([], _) => "Environment import failed".to_owned(),
+            ([name], 0) => format!("Imported environment \"{name}\""),
+            (names, 0) => format!("Imported {} environments", names.len()),
+            (names, failed) => format!("Imported {} environment(s), {failed} failed", names.len()),
+        };
+        self.notice = Some(Notice {
+            message,
+            error: imported.is_empty(),
+            details: failures,
+        });
+    }
+
     fn close_workspace(&mut self) {
         self.switch_workspace(Ok(Project::scratch()));
     }
@@ -493,6 +522,9 @@ impl CornuApp {
                     ui.separator();
                     if ui.button("Import Postman collection…").clicked() {
                         self.import_postman(ui.ctx());
+                    }
+                    if ui.button("Import Postman environment…").clicked() {
+                        self.import_postman_environments();
                     }
                 });
             });
@@ -1034,6 +1066,17 @@ pub fn last_workspace(storage: Option<&dyn eframe::Storage>) -> Option<PathBuf> 
         .map(PathBuf::from)
 }
 
+fn import_postman_environment(file: &Path, project: &mut Project) -> Result<String, String> {
+    let json = std::fs::read_to_string(file).map_err(|error| error.to_string())?;
+    let environment =
+        cornu_import::postman::parse_environment(&json).map_err(|error| error.to_string())?;
+    let name = environment.name.clone();
+    project
+        .add_environment(environment)
+        .map_err(|error| error.to_string())?;
+    Ok(name)
+}
+
 fn import_postman_file(
     file: &Path,
     workspace: &mut cornu_storage::Workspace,
@@ -1046,4 +1089,28 @@ fn import_postman_file(
         .write_into(workspace, Path::new(""))
         .map_err(|error| error.to_string())?;
     Ok((path, collection))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn postman_environment_imports_into_scratch_project() {
+        let mut project = Project::scratch();
+        let file = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../cornu-import/tests/fixtures/postman-environment.json"
+        ));
+        assert_eq!(
+            import_postman_environment(file, &mut project).unwrap(),
+            "Pet Store Dev"
+        );
+        let environment = project.environment(Some(0)).unwrap();
+        assert!(environment.variables.iter().any(|kv| kv.secret));
+
+        let error = import_postman_environment(Path::new("missing.json"), &mut project);
+        assert!(error.is_err());
+        assert_eq!(project.workspace.environments.len(), 1);
+    }
 }
