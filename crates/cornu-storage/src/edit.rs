@@ -165,10 +165,13 @@ impl Workspace {
         }
     }
 
-    pub fn create_environment(&mut self, name: &str) -> Result<usize, StorageError> {
+    pub fn create_environment(
+        &mut self,
+        environment: cornu_core::Environment,
+    ) -> Result<usize, StorageError> {
         let entry = EnvironmentEntry {
-            path: self.new_environment_path(name),
-            environment: cornu_core::Environment::new(name),
+            path: self.new_environment_path(&environment.name),
+            environment,
         };
         self.save_environment(&entry)?;
         self.environments.push(entry);

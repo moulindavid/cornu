@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use cornu_core::Environment;
 use eframe::egui;
 
 use crate::project::Project;
@@ -95,7 +96,7 @@ impl Environments {
         ui.add_space(6.0);
         if ui.button("+ New environment").clicked() {
             let name = format!("Environment {}", project.workspace.environments.len() + 1);
-            match project.add_environment(&name) {
+            match project.add_environment(Environment::new(name)) {
                 Ok(index) => self.selected = Selection::Environment(index),
                 Err(error) => return Some(error.to_string()),
             }
@@ -183,7 +184,7 @@ mod tests {
             KeyValue::new("version", "v1"),
         ];
         for (name, host) in [("dev", "dev.example"), ("prod", "prod.example")] {
-            let index = project.add_environment(name).unwrap();
+            let index = project.add_environment(Environment::new(name)).unwrap();
             project.workspace.environments[index]
                 .environment
                 .variables

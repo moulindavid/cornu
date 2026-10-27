@@ -415,7 +415,9 @@ fn updates_are_saved_in_place() {
 fn environments_can_be_created_and_deleted() {
     let (dir, mut workspace) = workspace();
     populate(&mut workspace);
-    let index = workspace.create_environment("Prod").unwrap();
+    let index = workspace
+        .create_environment(Environment::new("Prod"))
+        .unwrap();
     assert!(dir.path().join("environments/prod.toml").is_file());
 
     workspace.delete_environment(index).unwrap();
