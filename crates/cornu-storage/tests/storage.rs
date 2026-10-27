@@ -424,3 +424,69 @@ fn environments_can_be_created_and_deleted() {
     assert!(!read(dir.path(), ".cornu/secrets.toml").contains("dev-token"));
     assert!(Workspace::load(dir.path()).unwrap().environments.is_empty());
 }
+
+fn add_folder_secret(workspace: &mut Workspace, path: &str) {
+    let path = Path::new(path);
+    let mut settings = workspace.folder(path).unwrap().settings.clone();
+    settings
+        .variables
+        .push(KeyValue::new("folder_token", "folder-secret").secret());
+    workspace.update_folder(path, settings).unwrap();
+}
+
+#[test]
+fn folder_secrets_stay_out_of_shared_files() {
+    let (dir, mut workspace) = workspace();
+    populate(&mut workspace);
+    add_folder_secret(&mut workspace, "users");
+
+    let shared = read(dir.path(), "users/_folder.toml");
+    assert!(
+        !shared.contains("folder-secret") && shared.contains("secret = true"),
+        "{shared}"
+    );
+    let secrets = read(dir.path(), ".cornu/secrets.toml");
+    assert!(secrets.contains("[folders.users]"), "{secrets}");
+
+    let loaded = Workspace::load(dir.path()).unwrap();
+    assert_eq!(loaded.tree, workspace.tree);
+    let variables = loaded.variables(Path::new("users/list-users.req.toml"), None);
+    assert_eq!(variables.get("folder_token"), Some("folder-secret"));
+}
+
+#[test]
+fn folder_secrets_follow_renames_of_the_folder_and_its_parents() {
+    let (dir, mut workspace) = workspace();
+    populate(&mut workspace);
+    let nested = workspace
+        .create_folder(Path::new("users"), "Admin")
+        .unwrap();
+    add_folder_secret(&mut workspace, "users");
+    add_folder_secret(&mut workspace, nested.to_str().unwrap());
+
+    workspace.rename(Path::new("users"), "People").unwrap();
+    let secrets = read(dir.path(), ".cornu/secrets.toml");
+    assert!(!secrets.contains("[folders.users"), "{secrets}");
+    assert!(secrets.contains("[folders.\"people/admin\"]"), "{secrets}");
+
+    let loaded = Workspace::load(dir.path()).unwrap();
+    assert_eq!(loaded.tree, workspace.tree);
+    let admin = loaded.folder(Path::new("people/admin")).unwrap();
+    assert_eq!(admin.settings.variables[0].value, "folder-secret");
+}
+
+#[test]
+fn duplicated_and_deleted_folders_update_their_secrets() {
+    let (dir, mut workspace) = workspace();
+    populate(&mut workspace);
+    add_folder_secret(&mut workspace, "users");
+
+    workspace.duplicate(Path::new("users")).unwrap();
+    assert!(read(dir.path(), ".cornu/secrets.toml").contains("[folders.users-copy]"));
+
+    workspace.delete(Path::new("users")).unwrap();
+    let secrets = read(dir.path(), ".cornu/secrets.toml");
+    assert!(!secrets.contains("[folders.users]"), "{secrets}");
+    let loaded = Workspace::load(dir.path()).unwrap();
+    assert_eq!(loaded.tree, workspace.tree);
+}

@@ -48,6 +48,10 @@ fn collection_settings_are_imported() {
         KeyValue::new("base_url", "https://petstore.example.com/v2")
     );
     assert_eq!(root.variables[1], KeyValue::new("retries", "3"));
+    assert_eq!(
+        root.variables[2],
+        KeyValue::new("api_secret", "s3cret").secret()
+    );
     assert_eq!(root.request_count(), 9);
 }
 
@@ -154,13 +158,12 @@ fn unsupported_parts_produce_warnings() {
     let warnings = collection().warnings;
     let all = warnings.join("\n");
     assert!(all.contains("oauth2 auth is not supported"), "{all}");
-    assert!(all.contains("api_secret"), "{all}");
     assert!(
         all.contains("2 pre-request or test script(s) skipped"),
         "{all}"
     );
     assert!(all.contains("1 saved example response(s) skipped"), "{all}");
-    assert_eq!(warnings.len(), 4, "{all}");
+    assert_eq!(warnings.len(), 3, "{all}");
 }
 
 #[test]
@@ -213,6 +216,8 @@ fn imported_collection_is_written_as_a_folder() {
         panic!("expected the collection folder");
     };
     assert_eq!(store.settings.auth, collection.root.auth);
+    let shared = std::fs::read_to_string(dir.path().join("pet-store/_folder.toml")).unwrap();
+    assert!(!shared.contains("s3cret"), "{shared}");
     assert_eq!(store.items.len(), 5);
     let login = loaded
         .find_request(Path::new("pet-store/pets/nested/login.req.toml"))
