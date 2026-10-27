@@ -4,7 +4,7 @@ use eframe::egui;
 
 use crate::editor::auth_editor;
 use crate::project::Project;
-use crate::widgets::{count_label, key_value_table, variable_table};
+use crate::widgets::{count_label, variable_table};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum FolderTab {
@@ -50,9 +50,7 @@ pub fn folder_view(
         .id_salt(id)
         .show(ui, |ui| match tab {
             FolderTab::Auth => auth_editor(ui, &mut settings.auth),
-            // Secrets are only kept out of git for globals and environments.
-            FolderTab::Variables if is_root => variable_table(ui, id, &mut settings.variables),
-            FolderTab::Variables => key_value_table(ui, id, &mut settings.variables),
+            FolderTab::Variables => variable_table(ui, id, &mut settings.variables),
         });
 
     if settings == folder.settings {

@@ -14,6 +14,9 @@ pub(crate) struct Secrets {
     pub globals: Values,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub environments: BTreeMap<String, Values>,
+    /// Keyed by the folder path, with `/` separators on every platform.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub folders: BTreeMap<String, Values>,
 }
 
 impl Secrets {
@@ -33,6 +36,41 @@ impl Secrets {
     pub fn save(&self, root: &Path) -> Result<(), StorageError> {
         write_toml(&Self::path(root), self)
     }
+
+    /// Returns whether anything changed.
+    pub fn set_folder(&mut self, path: &Path, values: Values) -> bool {
+        let key = folder_key(path);
+        if values.is_empty() {
+            self.folders.remove(&key).is_some()
+        } else {
+            self.folders.insert(key, values.clone()) != Some(values)
+        }
+    }
+
+    /// Moves the secrets of `from` and of every folder inside it to `to`.
+    pub fn move_folders(&mut self, from: &Path, to: Option<&Path>) -> bool {
+        let moved: Vec<_> = self
+            .folders
+            .keys()
+            .filter(|key| Path::new(key).starts_with(from))
+            .cloned()
+            .collect();
+        for key in &moved {
+            let values = self.folders.remove(key).unwrap_or_default();
+            if let Some(to) = to {
+                let rest = Path::new(key).strip_prefix(from).unwrap_or(Path::new(""));
+                self.folders.insert(folder_key(&to.join(rest)), values);
+            }
+        }
+        !moved.is_empty()
+    }
+}
+
+pub(crate) fn folder_key(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Returns the rows to write to the shared file (secret values blanked) and the secret values.

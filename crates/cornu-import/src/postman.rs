@@ -85,7 +85,7 @@ impl Importer {
             })
             .collect();
         ImportedFolder {
-            variables: self.variables(object.get("variable"), &location),
+            variables: key_values(object.get("variable")),
             auth: self.auth(object.get("auth"), &location),
             name,
             items,
@@ -143,24 +143,6 @@ impl Importer {
             .get("event")
             .and_then(Value::as_array)
             .map_or(0, |events| events.iter().filter(has_code).count());
-    }
-
-    fn variables(&mut self, value: Option<&Value>, location: &str) -> Vec<KeyValue> {
-        let secrets: Vec<_> = value
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter(|variable| variable.get("type").and_then(Value::as_str) == Some("secret"))
-            .filter_map(|variable| string(variable.get("key")))
-            .collect();
-        if !secrets.is_empty() {
-            self.warnings.push(format!(
-                "{}: secret variable(s) {} are stored in plain text in the folder settings",
-                location,
-                secrets.join(", ")
-            ));
-        }
-        key_values(value)
     }
 
     fn auth(&mut self, value: Option<&Value>, location: &str) -> Auth {
@@ -406,6 +388,7 @@ fn key_values(value: Option<&Value>) -> Vec<KeyValue> {
             let key = string(row.get("key"))?;
             let mut kv = KeyValue::new(key, string(row.get("value")).unwrap_or_default());
             kv.enabled = !disabled(row);
+            kv.secret = row.get("type").and_then(Value::as_str) == Some("secret");
             kv.description = match row.get("description") {
                 Some(Value::Object(description)) => string(description.get("content")),
                 other => string(other),

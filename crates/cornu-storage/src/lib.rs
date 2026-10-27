@@ -128,7 +128,13 @@ impl Workspace {
         secrets::merge(&mut settings.variables, Some(&secrets.globals));
 
         let mut problems = Vec::new();
-        let items = load_items(&root, Path::new(""), &settings.order, &mut problems)?;
+        let items = load_items(
+            &root,
+            Path::new(""),
+            &settings.order,
+            &secrets,
+            &mut problems,
+        )?;
         settings.order.clear();
         let environments = load_environments(&root, &secrets, &mut problems);
         Ok(Self {
@@ -151,14 +157,17 @@ impl Workspace {
     pub fn save_folder(&self, folder: &Folder) -> Result<(), StorageError> {
         let mut settings = folder.settings.clone();
         settings.order = folder.items.iter().map(Item::entry_name).collect();
+        let (variables, values) = secrets::split(&settings.variables);
+        settings.variables = variables;
+        let mut secrets = Secrets::load(&self.root)?;
         if folder.path.as_os_str().is_empty() {
-            let (variables, values) = secrets::split(&settings.variables);
-            settings.variables = variables;
-            let mut secrets = Secrets::load(&self.root)?;
             secrets.globals = values;
             secrets.save(&self.root)?;
             write_toml(&self.root.join(CONFIG_FILE), &settings)
         } else {
+            if secrets.set_folder(&folder.path, values) {
+                secrets.save(&self.root)?;
+            }
             write_toml(&self.root.join(&folder.path).join(FOLDER_FILE), &settings)
         }
     }
@@ -259,6 +268,7 @@ fn load_items(
     root: &Path,
     dir: &Path,
     order: &[String],
+    secrets: &Secrets,
     problems: &mut Vec<String>,
 ) -> Result<Vec<Item>, StorageError> {
     let full = root.join(dir);
@@ -276,7 +286,7 @@ fn load_items(
             continue;
         }
         if entry.path().is_dir() {
-            match load_folder(root, &path, problems) {
+            match load_folder(root, &path, secrets, problems) {
                 Ok(folder) => items.push(Item::Folder(folder)),
                 Err(error) => problems.push(error.to_string()),
             }
@@ -298,6 +308,7 @@ fn load_items(
 fn load_folder(
     root: &Path,
     dir: &Path,
+    secrets: &Secrets,
     problems: &mut Vec<String>,
 ) -> Result<Folder, StorageError> {
     let settings_path = root.join(dir).join(FOLDER_FILE);
@@ -312,7 +323,9 @@ fn load_folder(
     if settings.name.is_empty() {
         settings.name = entry_name(dir);
     }
-    let items = load_items(root, dir, &settings.order, problems)?;
+    let values = secrets.folders.get(&secrets::folder_key(dir));
+    secrets::merge(&mut settings.variables, values);
+    let items = load_items(root, dir, &settings.order, secrets, problems)?;
     settings.order.clear();
     Ok(Folder {
         path: dir.to_owned(),

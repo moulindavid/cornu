@@ -105,6 +105,9 @@ impl Workspace {
         if new_path != path {
             rename_path(&self.root.join(path), &self.root.join(&new_path))?;
             rebase(&mut item, path, &new_path);
+            if matches!(item, Item::Folder(_)) {
+                self.move_folder_secrets(path, Some(&new_path))?;
+            }
         }
         match &item {
             Item::Folder(folder) => self.save_folder(folder)?,
@@ -146,12 +149,16 @@ impl Workspace {
             return Ok(());
         };
         let item = folder.items.remove(index);
+        let is_folder = matches!(item, Item::Folder(_));
         let full = self.root.join(path);
         let removed = match item {
             Item::Folder(_) => fs::remove_dir_all(&full),
             Item::Request(_) => fs::remove_file(&full),
         };
         removed.map_err(|source| StorageError::Io { path: full, source })?;
+        if is_folder {
+            self.move_folder_secrets(path, None)?;
+        }
         match self.folder(&parent).cloned() {
             Some(folder) => self.save_folder(&folder),
             None => Ok(()),
@@ -183,6 +190,14 @@ impl Workspace {
         }
         let full = self.root.join(&entry.path);
         fs::remove_file(&full).map_err(|source| StorageError::Io { path: full, source })
+    }
+
+    fn move_folder_secrets(&self, from: &Path, to: Option<&Path>) -> Result<(), StorageError> {
+        let mut secrets = Secrets::load(&self.root)?;
+        if secrets.move_folders(from, to) {
+            secrets.save(&self.root)?;
+        }
+        Ok(())
     }
 
     fn save_item(&self, item: &Item) -> Result<(), StorageError> {
