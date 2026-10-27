@@ -111,7 +111,7 @@ pub struct CornuApp {
     tree: Tree,
     sidebar_tab: SidebarTab,
     history: HistoryPanel,
-    notice: Option<String>,
+    notice: Option<Notice>,
     closing: Option<DocId>,
     deleting: Option<PathBuf>,
 }
@@ -226,7 +226,7 @@ impl CornuApp {
 
     fn save(&mut self, id: DocId) {
         if let Err(error) = self.try_save(id) {
-            self.notice = Some(error);
+            self.notice = Some(Notice::error(error));
         }
     }
 
@@ -276,20 +276,58 @@ impl CornuApp {
         self.switch_workspace(project);
     }
 
+    fn import_postman(&mut self, ctx: &egui::Context) {
+        if !self.project.is_on_disk() {
+            self.notice = Some(Notice::error(
+                "Open or create a workspace first: the collection is imported into it.",
+            ));
+            return;
+        }
+        let Some(file) = rfd::FileDialog::new()
+            .set_title("Import Postman collection")
+            .add_filter("Postman collection", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+        self.notice = Some(
+            match import_postman_file(&file, &mut self.project.workspace) {
+                Ok((path, collection)) => {
+                    Tree::expand(ctx, &path);
+                    Notice {
+                        message: format!(
+                            "Imported \"{}\": {} requests{}",
+                            collection.root.name,
+                            collection.root.request_count(),
+                            match collection.warnings.len() {
+                                0 => String::new(),
+                                count => format!(", {count} warning(s)"),
+                            }
+                        ),
+                        details: collection.warnings,
+                        error: false,
+                    }
+                }
+                Err(error) => Notice::error(format!("Import failed: {error}")),
+            },
+        );
+    }
+
     fn close_workspace(&mut self) {
         self.switch_workspace(Ok(Project::scratch()));
     }
 
     fn switch_workspace(&mut self, project: Result<Project, cornu_storage::StorageError>) {
         if self.documents.iter().any(Document::is_modified) {
-            self.notice =
-                Some("Save or close modified requests before switching workspace.".into());
+            self.notice = Some(Notice::error(
+                "Save or close modified requests before switching workspace.",
+            ));
             return;
         }
         let project = match project {
             Ok(project) => project,
             Err(error) => {
-                self.notice = Some(error.to_string());
+                self.notice = Some(Notice::error(error.to_string()));
                 return;
             }
         };
@@ -304,11 +342,12 @@ impl CornuApp {
         }
         self.notice = match project.workspace.problems.as_slice() {
             [] => None,
-            [problem] => Some(format!("Could not read {problem}")),
-            [first, rest @ ..] => Some(format!(
-                "Could not read {first} (and {} more files)",
-                rest.len()
-            )),
+            [problem] => Some(Notice::error(format!("Could not read {problem}"))),
+            problems => Some(Notice {
+                message: format!("Could not read {} files", problems.len()),
+                details: problems.to_vec(),
+                error: true,
+            }),
         };
         self.project = project;
         self.environments.reset();
@@ -317,7 +356,7 @@ impl CornuApp {
 
     fn apply(&mut self, ctx: &egui::Context, action: TreeAction) {
         if let Err(error) = self.try_apply(ctx, action) {
-            self.notice = Some(error.to_string());
+            self.notice = Some(Notice::error(error.to_string()));
         }
     }
 
@@ -376,7 +415,7 @@ impl CornuApp {
 
     fn delete(&mut self, path: &Path) {
         if let Err(error) = self.project.workspace.delete(path) {
-            self.notice = Some(error.to_string());
+            self.notice = Some(Notice::error(error.to_string()));
             return;
         }
         let removed: Vec<_> = self
@@ -427,7 +466,7 @@ impl CornuApp {
                 Err(error) => SendState::Failed(error.to_string()),
             };
             if let Err(error) = self.project.history.push(entry) {
-                self.notice = Some(error.to_string());
+                self.notice = Some(Notice::error(error.to_string()));
             }
         }
     }
@@ -450,6 +489,10 @@ impl CornuApp {
                     }
                     if self.project.is_on_disk() && ui.button("Close workspace").clicked() {
                         self.close_workspace();
+                    }
+                    ui.separator();
+                    if ui.button("Import Postman collection…").clicked() {
+                        self.import_postman(ui.ctx());
                     }
                 });
             });
@@ -529,12 +572,15 @@ impl CornuApp {
                 if self.project.workspace.find_request(&path).is_some() {
                     self.open_request(&path);
                 } else {
-                    self.notice = Some(format!("{} no longer exists.", path.display()));
+                    self.notice = Some(Notice::error(format!(
+                        "{} no longer exists.",
+                        path.display()
+                    )));
                 }
             }
             HistoryAction::Clear => {
                 if let Err(error) = self.project.history.clear() {
-                    self.notice = Some(error.to_string());
+                    self.notice = Some(Notice::error(error.to_string()));
                 }
             }
         }
@@ -647,7 +693,7 @@ impl CornuApp {
             Content::Folder(tab) => {
                 let path = doc.path.clone().unwrap_or_default();
                 if let Some(error) = folder_view(ui, &mut self.project, &path, tab) {
-                    self.notice = Some(error);
+                    self.notice = Some(Notice::error(error));
                 }
             }
             Content::Request(_) => self.request_view(ui, id),
@@ -754,7 +800,20 @@ impl CornuApp {
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| match &self.notice {
             Some(notice) => {
-                ui.colored_label(ui.visuals().error_fg_color, notice);
+                let color = if notice.error {
+                    ui.visuals().error_fg_color
+                } else {
+                    ui.visuals().text_color()
+                };
+                let label = ui.colored_label(color, &notice.message);
+                if !notice.details.is_empty() {
+                    label.on_hover_ui(|ui| {
+                        for detail in &notice.details {
+                            ui.label(format!("• {detail}"));
+                        }
+                    });
+                    ui.weak("(hover for details)");
+                }
                 if ui.small_button("×").on_hover_text("Dismiss").clicked() {
                     self.notice = None;
                 }
@@ -879,6 +938,22 @@ enum SidebarTab {
     History,
 }
 
+struct Notice {
+    message: String,
+    details: Vec<String>,
+    error: bool,
+}
+
+impl Notice {
+    fn error(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            details: Vec::new(),
+            error: true,
+        }
+    }
+}
+
 enum Close {
     Save,
     Discard,
@@ -941,7 +1016,7 @@ impl eframe::App for CornuApp {
         });
 
         if let Some(error) = self.environments.manager(ui.ctx(), &mut self.project) {
-            self.notice = Some(error);
+            self.notice = Some(Notice::error(error));
         }
         self.dialogs(ui.ctx());
     }
@@ -957,4 +1032,18 @@ pub fn last_workspace(storage: Option<&dyn eframe::Storage>) -> Option<PathBuf> 
         .and_then(|storage| storage.get_string(WORKSPACE_KEY))
         .filter(|root| !root.is_empty())
         .map(PathBuf::from)
+}
+
+fn import_postman_file(
+    file: &Path,
+    workspace: &mut cornu_storage::Workspace,
+) -> Result<(PathBuf, cornu_import::Collection), String> {
+    let json = std::fs::read_to_string(file).map_err(|error| error.to_string())?;
+    let collection =
+        cornu_import::postman::parse_collection(&json).map_err(|error| error.to_string())?;
+    let path = collection
+        .root
+        .write_into(workspace, Path::new(""))
+        .map_err(|error| error.to_string())?;
+    Ok((path, collection))
 }

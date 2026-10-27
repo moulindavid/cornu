@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 cornu-core.workspace = true
+cornu-import.workspace = true
 cornu-storage.workspace = true
 eframe = { workspace = true, features = ["persistence"] }
 rfd.workspace = true

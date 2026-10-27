@@ -1,0 +1,163 @@
+{
+  "info": {
+    "_postman_id": "8f0c2a43-1111-4c3b-9d5e-000000000001",
+    "name": "Pet Store",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+  },
+  "variable": [
+    { "key": "base_url", "value": "https://petstore.example.com/v2" },
+    { "key": "retries", "value": 3, "type": "number" },
+    { "key": "api_secret", "value": "s3cret", "type": "secret" }
+  ],
+  "event": [
+    { "listen": "prerequest", "script": { "type": "text/javascript", "exec": ["pm.variables.set('t', Date.now());"] } },
+    { "listen": "test", "script": { "type": "text/javascript", "exec": [""] } }
+  ],
+  "item": [
+    {
+      "name": "Pets",
+      "description": "Everything about pets",
+      "auth": { "type": "apikey", "apikey": [
+        { "key": "key", "value": "X-Api-Key" },
+        { "key": "value", "value": "{{api_key}}" },
+        { "key": "in", "value": "header" }
+      ] },
+      "item": [
+        {
+          "name": "Find pets by status",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "X-Debug", "value": "1", "disabled": true, "description": "Verbose logs" }
+            ],
+            "url": {
+              "raw": "{{base_url}}/pet/findByStatus?status=available&limit=10",
+              "host": ["{{base_url}}"],
+              "path": ["pet", "findByStatus"],
+              "query": [
+                { "key": "status", "value": "available" },
+                { "key": "limit", "value": "10" },
+                { "key": "tags", "value": "cute", "disabled": true }
+              ]
+            }
+          },
+          "response": [
+            { "name": "Example", "status": "OK", "code": 200, "body": "[]" }
+          ]
+        },
+        {
+          "name": "Get pet",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/pet/:petId",
+              "host": ["{{base_url}}"],
+              "path": ["pet", ":petId"],
+              "variable": [{ "key": "petId", "value": "42" }]
+            }
+          }
+        },
+        {
+          "name": "Add pet",
+          "event": [
+            { "listen": "test", "script": { "exec": ["pm.test('ok', () => pm.response.to.have.status(200));"] } }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"{{pet_name}}\",\n  \"status\": \"available\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{base_url}}/pet"
+          }
+        },
+        {
+          "name": "Upload image",
+          "request": {
+            "method": "POST",
+            "auth": { "type": "noauth" },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "additionalMetadata", "value": "front", "type": "text" },
+                { "key": "file", "type": "file", "src": "/tmp/dog.png", "contentType": "image/png" },
+                { "key": "old", "value": "x", "type": "text", "disabled": true }
+              ]
+            },
+            "url": "{{base_url}}/pet/42/uploadImage"
+          }
+        },
+        {
+          "name": "Nested",
+          "item": [
+            {
+              "name": "Login",
+              "request": {
+                "method": "POST",
+                "auth": { "type": "basic", "basic": [
+                  { "key": "username", "value": "admin" },
+                  { "key": "password", "value": "{{password}}" }
+                ] },
+                "body": {
+                  "mode": "urlencoded",
+                  "urlencoded": [
+                    { "key": "grant_type", "value": "password" },
+                    { "key": "scope", "value": "read", "disabled": true }
+                  ]
+                },
+                "url": {
+                  "protocol": "https",
+                  "host": ["auth", "example", "com"],
+                  "path": ["oauth", "token"]
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Countries (GraphQL)",
+      "request": {
+        "method": "POST",
+        "auth": { "type": "oauth2", "oauth2": [{ "key": "grant_type", "value": "client_credentials" }] },
+        "body": {
+          "mode": "graphql",
+          "graphql": {
+            "query": "query ($code: ID!) { country(code: $code) { name } }",
+            "variables": "{\"code\": \"FR\"}"
+          }
+        },
+        "url": "https://countries.trevorblades.com/"
+      }
+    },
+    {
+      "name": "Upload raw file",
+      "request": {
+        "method": "PUT",
+        "body": { "mode": "file", "file": { "src": "/tmp/data.bin" } },
+        "url": "{{base_url}}/store/upload"
+      }
+    },
+    {
+      "name": "Plain XML",
+      "request": {
+        "method": "post",
+        "header": "Accept: application/xml\nX-Trace: on",
+        "body": { "mode": "raw", "raw": "<pet/>", "options": { "raw": { "language": "xml" } } },
+        "url": "{{base_url}}/legacy"
+      }
+    },
+    {
+      "name": "Shorthand",
+      "request": "https://example.com/ping?verbose=1"
+    }
+  ]
+}

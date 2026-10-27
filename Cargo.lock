@@ -863,12 +863,24 @@ name = "cornu-gui"
 version = "0.1.0"
 dependencies = [
  "cornu-core",
+ "cornu-import",
  "cornu-storage",
  "eframe",
  "rfd",
  "serde_json",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "cornu-import"
+version = "0.1.0"
+dependencies = [
+ "cornu-core",
+ "cornu-storage",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
