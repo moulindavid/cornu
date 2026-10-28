@@ -1154,8 +1154,15 @@ impl eframe::App for CornuApp {
             self.notice = Some(Notice::error(error));
         }
         self.dialogs(ui.ctx());
-        if let Some(collection) = self.spec_import.show(ui.ctx(), &self.worker) {
-            self.import_collection(ui.ctx(), Ok(collection));
+        if let Some(discovered) = self.spec_import.show(ui.ctx(), &self.worker) {
+            self.import_collection(ui.ctx(), Ok(discovered.collection));
+            if let Some(notice) = &mut self.notice
+                && !notice.error
+            {
+                notice
+                    .details
+                    .insert(0, format!("Spec found at {}", discovered.url));
+            }
         }
     }
 

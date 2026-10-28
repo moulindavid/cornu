@@ -1,4 +1,5 @@
 pub mod curl;
+pub mod discovery;
 pub mod openapi;
 pub mod postman;
 

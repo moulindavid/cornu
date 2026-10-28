@@ -49,17 +49,17 @@ impl Worker {
             .abort_handle()
     }
 
-    /// For one-off downloads that do not belong to a request tab.
-    pub fn fetch(
-        &self,
-        ctx: &egui::Context,
-        request: Request,
-    ) -> Receiver<Result<Response, SendError>> {
-        let client = self.client.clone();
+    /// For background jobs that do not belong to a request tab.
+    pub fn run<T, F>(&self, ctx: &egui::Context, job: impl FnOnce(HttpClient) -> F) -> Receiver<T>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let future = job(self.client.clone());
         let (tx, rx) = channel();
         let ctx = ctx.clone();
         self.runtime.spawn(async move {
-            let _ = tx.send(client.send(&request).await);
+            let _ = tx.send(future.await);
             ctx.request_repaint();
         });
         rx

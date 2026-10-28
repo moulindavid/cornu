@@ -1,18 +1,17 @@
 use std::sync::mpsc::Receiver;
 
-use cornu_core::{Method, Request, Response, SendError};
-use cornu_import::Collection;
+use cornu_import::discovery::{Discovered, DiscoveryError, discover};
 use eframe::egui;
 
 use crate::worker::Worker;
 
-/// The "Import OpenAPI from URL" dialog and its download.
+/// The "Import OpenAPI from URL" dialog and its background spec discovery.
 #[derive(Default)]
 pub struct SpecImport {
     open: bool,
     url: String,
     error: Option<String>,
-    pending: Option<Receiver<Result<Response, SendError>>>,
+    pending: Option<Receiver<Result<Discovered, DiscoveryError>>>,
 }
 
 impl SpecImport {
@@ -21,7 +20,7 @@ impl SpecImport {
         self.error = None;
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, worker: &Worker) -> Option<Collection> {
+    pub fn show(&mut self, ctx: &egui::Context, worker: &Worker) -> Option<Discovered> {
         let imported = self.poll();
         if imported.is_some() {
             self.open = false;
@@ -36,10 +35,10 @@ impl SpecImport {
         let modal = egui::Modal::new(egui::Id::unique("import-spec")).show(ctx, |ui| {
             ui.set_width(460.0);
             ui.heading("Import OpenAPI / Swagger");
-            ui.label("URL of a JSON or YAML spec:");
+            ui.label("URL of the spec, of the API or of its docs page:");
             let field = ui.add(
                 egui::TextEdit::singleline(&mut self.url)
-                    .hint_text("https://petstore3.swagger.io/api/v3/openapi.json")
+                    .hint_text("https://petstore3.swagger.io")
                     .desired_width(f32::INFINITY),
             );
             if field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
@@ -60,17 +59,15 @@ impl SpecImport {
                 }
                 if downloading {
                     ui.add(egui::Spinner::new());
-                    ui.weak("Downloading…");
+                    ui.weak("Looking for a spec…");
                 }
             });
         });
         if start && self.pending.is_none() && !self.url.trim().is_empty() {
             self.error = None;
-            let request = Request::new(Method::Get, self.url.trim()).with_header(
-                "Accept",
-                "application/json, application/yaml;q=0.9, */*;q=0.8",
-            );
-            self.pending = Some(worker.fetch(ctx, request));
+            let url = self.url.trim().to_owned();
+            self.pending =
+                Some(worker.run(ctx, |client| async move { discover(&client, &url).await }));
         }
         if cancel || modal.should_close() {
             self.open = false;
@@ -79,58 +76,15 @@ impl SpecImport {
         None
     }
 
-    fn poll(&mut self) -> Option<Collection> {
+    fn poll(&mut self) -> Option<Discovered> {
         let result = self.pending.as_ref()?.try_recv().ok()?;
         self.pending = None;
-        match parse_download(result, self.url.trim()) {
-            Ok(collection) => Some(collection),
+        match result {
+            Ok(discovered) => Some(discovered),
             Err(error) => {
-                self.error = Some(error);
+                self.error = Some(error.to_string());
                 None
             }
         }
-    }
-}
-
-fn parse_download(result: Result<Response, SendError>, url: &str) -> Result<Collection, String> {
-    let response = result.map_err(|error| error.to_string())?;
-    if !(200..300).contains(&response.status) {
-        return Err(format!("The server answered {}", response.status));
-    }
-    let text = String::from_utf8_lossy(&response.body);
-    cornu_import::openapi::parse_spec(&text, Some(url)).map_err(|error| error.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn response(status: u16, body: &str) -> Response {
-        Response {
-            status,
-            headers: Vec::new(),
-            body: body.as_bytes().to_vec(),
-            elapsed: Default::default(),
-        }
-    }
-
-    #[test]
-    fn downloads_are_parsed_relative_to_their_url() {
-        let spec = "openapi: 3.0.0\ninfo:\n  title: Remote\nservers:\n  - url: /v1\npaths: {}\n";
-        let collection = parse_download(
-            Ok(response(200, spec)),
-            "https://api.example/docs/openapi.yaml",
-        )
-        .unwrap();
-        assert_eq!(collection.root.name, "Remote");
-        assert_eq!(collection.root.variables[0].value, "https://api.example/v1");
-    }
-
-    #[test]
-    fn http_errors_and_bad_documents_are_reported() {
-        let error = parse_download(Ok(response(404, "nope")), "https://x").unwrap_err();
-        assert!(error.contains("404"), "{error}");
-        let error = parse_download(Ok(response(200, "<html>")), "https://x").unwrap_err();
-        assert!(!error.is_empty());
     }
 }
