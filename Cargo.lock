@@ -882,7 +882,9 @@ dependencies = [
  "serde_yaml_ng",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
  "url",
+ "wiremock",
 ]
 
 [[package]]
