@@ -1,3 +1,4 @@
+pub mod curl;
 pub mod postman;
 
 use std::path::{Path, PathBuf};

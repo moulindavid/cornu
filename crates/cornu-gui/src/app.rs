@@ -746,9 +746,33 @@ impl CornuApp {
             return;
         };
 
+        let url_id = egui::Id::unique(("url", id));
+        if ui.memory(|memory| memory.has_focus(url_id))
+            && let Some(command) = ui.input_mut(|input| take_curl_paste(&mut input.events))
+        {
+            self.notice = Some(match cornu_import::curl::parse(&command) {
+                Ok(parsed) => {
+                    let name = std::mem::take(&mut doc.request.name);
+                    doc.request = parsed.request.with_name(name);
+                    Notice {
+                        message: match parsed.warnings.len() {
+                            0 => "Request filled from curl command".to_owned(),
+                            count => {
+                                format!("Request filled from curl command, {count} warning(s)")
+                            }
+                        },
+                        details: parsed.warnings,
+                        error: false,
+                    }
+                }
+                Err(error) => Notice::error(format!("Could not read curl command: {error}")),
+            });
+        }
+
         let mut send = send_pressed;
         let mut cancel = false;
         let mut save = false;
+        let mut copy_curl = false;
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt(("method", id))
                 .selected_text(doc.request.method.as_str())
@@ -769,6 +793,11 @@ impl CornuApp {
                 if save_button.on_hover_text("Ctrl+S").clicked() {
                     save = true;
                 }
+                ui.menu_button("⋯", |ui| {
+                    if ui.button("Copy as cURL").clicked() {
+                        copy_curl = true;
+                    }
+                });
                 if ui.button(button).clicked() {
                     if sending {
                         cancel = true;
@@ -778,6 +807,7 @@ impl CornuApp {
                 }
                 let url = variable_field(
                     ui,
+                    url_id,
                     &mut doc.request.url,
                     &variables,
                     "https://api.example.com/users",
@@ -787,6 +817,21 @@ impl CornuApp {
                 }
             });
         });
+
+        if copy_curl {
+            let mut request = doc.request.clone();
+            request.auth = self.project.effective_auth(path.as_deref(), &request.auth);
+            let resolved = request.resolve(&variables);
+            ctx.copy_text(cornu_import::curl::to_curl(&resolved.request));
+            self.notice = Some(Notice::info(if resolved.unresolved.is_empty() {
+                "Copied as cURL".to_owned()
+            } else {
+                format!(
+                    "Copied as cURL, with unresolved variables: {}",
+                    resolved.unresolved.join(", ")
+                )
+            }));
+        }
 
         if cancel && let SendState::Sending { abort, .. } = &doc.state {
             abort.abort();
@@ -977,6 +1022,14 @@ struct Notice {
 }
 
 impl Notice {
+    fn info(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            details: Vec::new(),
+            error: false,
+        }
+    }
+
     fn error(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -1066,6 +1119,17 @@ pub fn last_workspace(storage: Option<&dyn eframe::Storage>) -> Option<PathBuf> 
         .map(PathBuf::from)
 }
 
+/// Taken before the URL field sees it, which would flatten the command onto one line.
+fn take_curl_paste(events: &mut Vec<egui::Event>) -> Option<String> {
+    let index = events.iter().position(
+        |event| matches!(event, egui::Event::Paste(text) if cornu_import::curl::is_curl(text)),
+    )?;
+    match events.remove(index) {
+        egui::Event::Paste(text) => Some(text),
+        _ => None,
+    }
+}
+
 fn import_postman_environment(file: &Path, project: &mut Project) -> Result<String, String> {
     let json = std::fs::read_to_string(file).map_err(|error| error.to_string())?;
     let environment =
@@ -1112,5 +1176,18 @@ mod tests {
         let error = import_postman_environment(Path::new("missing.json"), &mut project);
         assert!(error.is_err());
         assert_eq!(project.workspace.environments.len(), 1);
+    }
+
+    #[test]
+    fn only_curl_pastes_are_taken() {
+        let command = "curl https://example.com \\\n  -H 'A: 1'".to_owned();
+        let mut events = vec![
+            egui::Event::Paste("https://plain.example".into()),
+            egui::Event::Paste(command.clone()),
+            egui::Event::Text("x".into()),
+        ];
+        assert_eq!(take_curl_paste(&mut events), Some(command));
+        assert_eq!(events.len(), 2);
+        assert_eq!(take_curl_paste(&mut events), None);
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "cornu-import"
-description = "Importers for cornu: Postman collections and more"
+description = "Importers for cornu: Postman collections and environments, cURL"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,6 +12,7 @@ cornu-core.workspace = true
 cornu-storage.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
