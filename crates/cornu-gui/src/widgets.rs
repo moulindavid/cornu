@@ -161,6 +161,7 @@ fn show_in(ui: &mut egui::Ui, area: egui::Rect, contents: impl FnOnce(&mut egui:
 
 pub fn variable_field(
     ui: &mut egui::Ui,
+    id: egui::Id,
     text: &mut String,
     variables: &Variables,
     hint: &str,
@@ -191,6 +192,7 @@ pub fn variable_field(
 
     let response = ui.add(
         egui::TextEdit::singleline(text)
+            .id(id)
             .hint_text(hint)
             .desired_width(f32::INFINITY)
             .layouter(&mut layouter),
