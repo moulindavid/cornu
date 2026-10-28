@@ -30,7 +30,7 @@ On Linux you may need the usual windowing dev packages (X11/Wayland, `libxkbcomm
 |-------|---------|
 | `cornu-core` | Request model, variable interpolation, HTTP execution (no UI dependency) |
 | `cornu-storage` | Git-friendly workspace format: one TOML file per request, secrets kept in `.cornu/` |
-| `cornu-import` | Importers: Postman v2.0 / v2.1 collections and environments, cURL (parse and export) |
+| `cornu-import` | Importers: Postman v2.0 / v2.1 collections and environments, OpenAPI 3 / Swagger 2 (JSON or YAML), cURL (parse and export) |
 | `cornu-gui` | Desktop application (`cornu` binary) |
 
 ## License

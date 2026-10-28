@@ -11,6 +11,7 @@ use crate::environments::Environments;
 use crate::folder::{FolderTab, folder_view};
 use crate::format;
 use crate::history::{HistoryAction, HistoryPanel};
+use crate::import::SpecImport;
 use crate::project::Project;
 use crate::response::ResponseView;
 use crate::tree::{Tree, TreeAction, method_color};
@@ -99,6 +100,9 @@ impl Document {
     }
 }
 
+const NEEDS_WORKSPACE: &str =
+    "Open or create a workspace first: the collection is imported into it.";
+
 pub struct CornuApp {
     worker: Worker,
     project: Project,
@@ -114,6 +118,7 @@ pub struct CornuApp {
     notice: Option<Notice>,
     closing: Option<DocId>,
     deleting: Option<PathBuf>,
+    spec_import: SpecImport,
 }
 
 impl CornuApp {
@@ -133,6 +138,7 @@ impl CornuApp {
             notice: None,
             closing: None,
             deleting: None,
+            spec_import: SpecImport::default(),
         };
         if let Some(root) = workspace {
             app.switch_workspace(Project::open(&root));
@@ -276,41 +282,69 @@ impl CornuApp {
         self.switch_workspace(project);
     }
 
-    fn import_postman(&mut self, ctx: &egui::Context) {
+    fn import_file(&mut self, ctx: &egui::Context, kind: FileImport) {
         if !self.project.is_on_disk() {
-            self.notice = Some(Notice::error(
-                "Open or create a workspace first: the collection is imported into it.",
-            ));
+            self.notice = Some(Notice::error(NEEDS_WORKSPACE));
             return;
         }
+        let (title, filter, extensions): (_, _, &[&str]) = match kind {
+            FileImport::Postman => ("Import Postman collection", "Postman collection", &["json"]),
+            FileImport::OpenApi => (
+                "Import OpenAPI or Swagger spec",
+                "OpenAPI / Swagger",
+                &["json", "yaml", "yml"],
+            ),
+        };
         let Some(file) = rfd::FileDialog::new()
-            .set_title("Import Postman collection")
-            .add_filter("Postman collection", &["json"])
+            .set_title(title)
+            .add_filter(filter, extensions)
             .pick_file()
         else {
             return;
         };
-        self.notice = Some(
-            match import_postman_file(&file, &mut self.project.workspace) {
-                Ok((path, collection)) => {
-                    Tree::expand(ctx, &path);
-                    Notice {
-                        message: format!(
-                            "Imported \"{}\": {} requests{}",
-                            collection.root.name,
-                            collection.root.request_count(),
-                            match collection.warnings.len() {
-                                0 => String::new(),
-                                count => format!(", {count} warning(s)"),
-                            }
-                        ),
-                        details: collection.warnings,
-                        error: false,
-                    }
+        let parsed = std::fs::read_to_string(&file)
+            .map_err(|error| error.to_string())
+            .and_then(|text| {
+                match kind {
+                    FileImport::Postman => cornu_import::postman::parse_collection(&text),
+                    FileImport::OpenApi => cornu_import::openapi::parse_spec(&text, None),
                 }
-                Err(error) => Notice::error(format!("Import failed: {error}")),
-            },
-        );
+                .map_err(|error| error.to_string())
+            });
+        self.import_collection(ctx, parsed);
+    }
+
+    fn import_collection(
+        &mut self,
+        ctx: &egui::Context,
+        parsed: Result<cornu_import::Collection, String>,
+    ) {
+        let written = parsed.and_then(|collection| {
+            collection
+                .root
+                .write_into(&mut self.project.workspace, Path::new(""))
+                .map(|path| (path, collection))
+                .map_err(|error| error.to_string())
+        });
+        self.notice = Some(match written {
+            Ok((path, collection)) => {
+                Tree::expand(ctx, &path);
+                Notice {
+                    message: format!(
+                        "Imported \"{}\": {} requests{}",
+                        collection.root.name,
+                        collection.root.request_count(),
+                        match collection.warnings.len() {
+                            0 => String::new(),
+                            count => format!(", {count} warning(s)"),
+                        }
+                    ),
+                    details: collection.warnings,
+                    error: false,
+                }
+            }
+            Err(error) => Notice::error(format!("Import failed: {error}")),
+        });
     }
 
     fn import_postman_environments(&mut self) {
@@ -521,10 +555,20 @@ impl CornuApp {
                     }
                     ui.separator();
                     if ui.button("Import Postman collection…").clicked() {
-                        self.import_postman(ui.ctx());
+                        self.import_file(ui.ctx(), FileImport::Postman);
                     }
                     if ui.button("Import Postman environment…").clicked() {
                         self.import_postman_environments();
+                    }
+                    if ui.button("Import OpenAPI / Swagger file…").clicked() {
+                        self.import_file(ui.ctx(), FileImport::OpenApi);
+                    }
+                    if ui.button("Import OpenAPI / Swagger from URL…").clicked() {
+                        if self.project.is_on_disk() {
+                            self.spec_import.open();
+                        } else {
+                            self.notice = Some(Notice::error(NEEDS_WORKSPACE));
+                        }
                     }
                 });
             });
@@ -1008,6 +1052,12 @@ impl CornuApp {
     }
 }
 
+#[derive(Clone, Copy)]
+enum FileImport {
+    Postman,
+    OpenApi,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum SidebarTab {
     #[default]
@@ -1104,6 +1154,9 @@ impl eframe::App for CornuApp {
             self.notice = Some(Notice::error(error));
         }
         self.dialogs(ui.ctx());
+        if let Some(collection) = self.spec_import.show(ui.ctx(), &self.worker) {
+            self.import_collection(ui.ctx(), Ok(collection));
+        }
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -1139,20 +1192,6 @@ fn import_postman_environment(file: &Path, project: &mut Project) -> Result<Stri
         .add_environment(environment)
         .map_err(|error| error.to_string())?;
     Ok(name)
-}
-
-fn import_postman_file(
-    file: &Path,
-    workspace: &mut cornu_storage::Workspace,
-) -> Result<(PathBuf, cornu_import::Collection), String> {
-    let json = std::fs::read_to_string(file).map_err(|error| error.to_string())?;
-    let collection =
-        cornu_import::postman::parse_collection(&json).map_err(|error| error.to_string())?;
-    let path = collection
-        .root
-        .write_into(workspace, Path::new(""))
-        .map_err(|error| error.to_string())?;
-    Ok((path, collection))
 }
 
 #[cfg(test)]

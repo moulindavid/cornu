@@ -49,6 +49,22 @@ impl Worker {
             .abort_handle()
     }
 
+    /// For one-off downloads that do not belong to a request tab.
+    pub fn fetch(
+        &self,
+        ctx: &egui::Context,
+        request: Request,
+    ) -> Receiver<Result<Response, SendError>> {
+        let client = self.client.clone();
+        let (tx, rx) = channel();
+        let ctx = ctx.clone();
+        self.runtime.spawn(async move {
+            let _ = tx.send(client.send(&request).await);
+            ctx.request_repaint();
+        });
+        rx
+    }
+
     pub fn completed(&self) -> impl Iterator<Item = Completed> + '_ {
         self.rx.try_iter()
     }

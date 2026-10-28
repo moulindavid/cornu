@@ -5,6 +5,7 @@ mod folder;
 mod format;
 mod highlight;
 mod history;
+mod import;
 mod project;
 mod response;
 mod tree;
