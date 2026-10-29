@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use cornu_core::{ApiKeyLocation, Auth, Body, KeyValue, MultipartPart, PartValue, Request};
+use cornu_core::{ApiKeyLocation, Auth, Body, KeyValue, Method, MultipartPart, PartValue, Request};
 use eframe::egui;
 
 use crate::widgets::{column_widths, count_label, key_value_table};
@@ -58,7 +58,17 @@ pub fn request_editor(
         .show(ui, |ui| match state.tab {
             Tab::Params => key_value_table(ui, id.with("params"), &mut request.query),
             Tab::Headers => key_value_table(ui, id.with("headers"), &mut request.headers),
-            Tab::Body => body_editor(ui, id.with("body"), &mut request.body, state),
+            Tab::Body => {
+                let before = body_kind(&request.body);
+                body_editor(ui, id.with("body"), &mut request.body, state);
+                // GraphQL servers expect POST; a GET left over from a new draft would be rejected.
+                if before != BodyKind::GraphQl
+                    && body_kind(&request.body) == BodyKind::GraphQl
+                    && request.method == Method::Get
+                {
+                    request.method = Method::Post;
+                }
+            }
             Tab::Auth => auth_editor(ui, &mut request.auth),
         });
 }
@@ -93,13 +103,15 @@ enum BodyKind {
     Form,
     Multipart,
     Binary,
+    GraphQl,
 }
 
 impl BodyKind {
-    const ALL: [BodyKind; 6] = [
+    const ALL: [BodyKind; 7] = [
         BodyKind::None,
         BodyKind::Raw,
         BodyKind::Json,
+        BodyKind::GraphQl,
         BodyKind::Form,
         BodyKind::Multipart,
         BodyKind::Binary,
@@ -113,6 +125,7 @@ impl BodyKind {
             BodyKind::Form => "Form URL-encoded",
             BodyKind::Multipart => "Multipart",
             BodyKind::Binary => "Binary file",
+            BodyKind::GraphQl => "GraphQL",
         }
     }
 }
@@ -125,12 +138,18 @@ fn body_kind(body: &Body) -> BodyKind {
         Body::FormUrlEncoded { .. } => BodyKind::Form,
         Body::Multipart { .. } => BodyKind::Multipart,
         Body::Binary { .. } => BodyKind::Binary,
+        Body::GraphQl { .. } => BodyKind::GraphQl,
     }
 }
 
 fn convert_body(body: &Body, kind: BodyKind) -> Body {
     let text = match body {
         Body::Raw { text, .. } | Body::Json { text } => text.clone(),
+        Body::GraphQl { query, variables } => Body::graphql_payload(query, variables)
+            .ok()
+            .and_then(|payload| serde_json::from_str::<serde_json::Value>(&payload).ok())
+            .and_then(|payload| serde_json::to_string_pretty(&payload).ok())
+            .unwrap_or_default(),
         _ => String::new(),
     };
     match kind {
@@ -146,6 +165,10 @@ fn convert_body(body: &Body, kind: BodyKind) -> Body {
             path: PathBuf::new(),
             content_type: None,
         },
+        BodyKind::GraphQl => Body::graphql_from_payload(&text).unwrap_or(Body::GraphQl {
+            query: String::new(),
+            variables: String::new(),
+        }),
     }
 }
 
@@ -195,6 +218,49 @@ fn body_editor(ui: &mut egui::Ui, id: egui::Id, body: &mut Body, state: &mut Edi
                 path_picker(ui, path, f32::INFINITY);
             });
         }
+        Body::GraphQl { query, variables } => graphql_editor(ui, query, variables, state),
+    }
+}
+
+fn graphql_editor(
+    ui: &mut egui::Ui,
+    query: &mut String,
+    variables: &mut String,
+    state: &mut EditorState,
+) {
+    ui.columns(2, |columns| {
+        columns[0].label("Query");
+        code_area(&mut columns[0], query);
+
+        let ui = &mut columns[1];
+        ui.horizontal(|ui| {
+            ui.label("Variables");
+            if ui.small_button("Format").clicked() && !variables.trim().is_empty() {
+                state.json_error = format_json(variables).err();
+            }
+        });
+        if code_area(ui, variables).changed() {
+            state.json_error = None;
+        }
+        let error = state
+            .json_error
+            .clone()
+            .or_else(|| variables_problem(variables));
+        if let Some(error) = error {
+            ui.colored_label(ui.visuals().warn_fg_color, error);
+        }
+    });
+}
+
+/// Placeholders such as `{"id": {{id}}}` only become valid JSON once resolved.
+fn variables_problem(variables: &str) -> Option<String> {
+    if variables.trim().is_empty() || variables.contains("{{") {
+        return None;
+    }
+    match serde_json::from_str::<serde_json::Value>(variables) {
+        Ok(serde_json::Value::Object(_)) => None,
+        Ok(_) => Some("Variables must be a JSON object".into()),
+        Err(error) => Some(format!("Invalid JSON: {error}")),
     }
 }
 
@@ -440,6 +506,68 @@ mod tests {
         let raw = convert_body(&json, BodyKind::Raw);
         assert!(matches!(&raw, Body::Raw { text, .. } if text == "{\"a\":1}"));
         assert_eq!(convert_body(&raw, BodyKind::Json), json);
+    }
+
+    #[test]
+    fn switching_between_json_and_graphql_keeps_the_payload() {
+        let json = Body::Json {
+            text: r#"{"query": "{ a }", "variables": {"id": 1}}"#.into(),
+        };
+        let graphql = convert_body(&json, BodyKind::GraphQl);
+        assert_eq!(
+            graphql,
+            Body::GraphQl {
+                query: "{ a }".into(),
+                variables: "{\n  \"id\": 1\n}".into()
+            }
+        );
+        let Body::Json { text } = convert_body(&graphql, BodyKind::Json) else {
+            panic!("expected json");
+        };
+        assert_eq!(
+            convert_body(&Body::Json { text }, BodyKind::GraphQl),
+            graphql
+        );
+        assert_eq!(
+            convert_body(&Body::None, BodyKind::GraphQl),
+            Body::GraphQl {
+                query: String::new(),
+                variables: String::new()
+            }
+        );
+    }
+
+    #[test]
+    fn graphql_editor_renders_query_and_variables() {
+        let mut request = Request::new(Method::Get, "https://x.example/graphql");
+        request.body = Body::GraphQl {
+            query: "{ countries { code } }".into(),
+            variables: "[1]".into(),
+        };
+        let mut state = EditorState {
+            tab: Tab::Body,
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            request_editor(ui, egui::Id::unique("editor"), &mut request, &mut state);
+        });
+        output.textures_delta.clear();
+        let text = format!("{:?}", output.shapes);
+        assert!(
+            text.contains("countries") && text.contains("Variables"),
+            "{text}"
+        );
+        assert!(text.contains("must be a JSON object"), "{text}");
+    }
+
+    #[test]
+    fn graphql_variables_are_checked_unless_templated() {
+        assert_eq!(variables_problem(""), None);
+        assert_eq!(variables_problem(r#"{"id": {{id}}}"#), None);
+        assert_eq!(variables_problem(r#"{"id": 1}"#), None);
+        assert!(variables_problem("[1]").is_some());
+        assert!(variables_problem("{ nope").is_some());
     }
 
     #[test]

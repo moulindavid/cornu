@@ -131,12 +131,12 @@ fn bodies_are_converted() {
     assert!(matches!(&login.body, Body::FormUrlEncoded { fields } if !fields[1].enabled));
 
     let graphql = request(&root, "Countries (GraphQL)");
-    let Body::Json { text } = &graphql.body else {
-        panic!("expected json");
+    let Body::GraphQl { query, variables } = &graphql.body else {
+        panic!("expected graphql");
     };
-    let payload: serde_json::Value = serde_json::from_str(text).unwrap();
-    assert_eq!(payload["variables"]["code"], "FR");
-    assert!(payload["query"].as_str().unwrap().contains("country"));
+    assert!(query.contains("country"));
+    let variables: serde_json::Value = serde_json::from_str(variables).unwrap();
+    assert_eq!(variables["code"], "FR");
 
     let file = request(&root, "Upload raw file");
     assert!(matches!(&file.body, Body::Binary { path, .. } if path == Path::new("/tmp/data.bin")));

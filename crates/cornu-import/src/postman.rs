@@ -279,19 +279,12 @@ impl Importer {
                 let query = graphql
                     .and_then(|graphql| string(graphql.get("query")))
                     .unwrap_or_default();
-                let variables = graphql
-                    .and_then(|graphql| graphql.get("variables"))
-                    .map(|variables| match variables {
-                        Value::String(text) if text.trim().is_empty() => Value::Object(Map::new()),
-                        Value::String(text) => serde_json::from_str(text)
-                            .unwrap_or_else(|_| Value::String(text.clone())),
-                        other => other.clone(),
-                    })
-                    .unwrap_or_else(|| Value::Object(Map::new()));
-                let payload = serde_json::json!({ "query": query, "variables": variables });
-                Body::Json {
-                    text: serde_json::to_string_pretty(&payload).unwrap_or_default(),
-                }
+                let variables = match graphql.and_then(|graphql| graphql.get("variables")) {
+                    None | Some(Value::Null) => String::new(),
+                    Some(Value::String(text)) => text.trim().to_owned(),
+                    Some(other) => serde_json::to_string_pretty(other).unwrap_or_default(),
+                };
+                Body::GraphQl { query, variables }
             }
             Some(other) => {
                 self.warnings.push(format!(
