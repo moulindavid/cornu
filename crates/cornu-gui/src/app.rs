@@ -913,6 +913,15 @@ impl CornuApp {
                 response_view(ui, &mut doc.state);
             },
         );
+        if doc.editor.schema.take_fetch_request() {
+            let mut request = doc.request.clone();
+            request.auth = self.project.effective_auth(path.as_deref(), &request.auth);
+            let request = request.resolve(&variables).request;
+            let pending = self.worker.run(&ctx, |client| async move {
+                cornu_core::graphql::introspect(&client, &request).await
+            });
+            doc.editor.schema.start(pending);
+        }
         if save {
             self.save(id);
         }
