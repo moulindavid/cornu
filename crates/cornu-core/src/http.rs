@@ -43,6 +43,8 @@ pub enum SendError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("invalid GraphQL variables: {0}")]
+    InvalidGraphqlVariables(String),
     #[error("request timed out")]
     Timeout,
     #[error("connection failed: {0}")]
@@ -124,6 +126,10 @@ impl HttpClient {
             }
             Body::Multipart { parts } => builder.multipart(build_multipart(parts).await?),
             Body::Binary { path, .. } => builder.body(read_file(path).await?),
+            Body::GraphQl { query, variables } => builder.body(
+                Body::graphql_payload(query, variables)
+                    .map_err(|error| SendError::InvalidGraphqlVariables(error.to_string()))?,
+            ),
         };
 
         let started = Instant::now();

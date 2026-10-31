@@ -153,6 +153,31 @@ fn windows_cmd_continuations_and_errors() {
 }
 
 #[test]
+fn graphql_payloads_become_graphql_bodies() {
+    let request = parsed(
+        r#"curl https://countries.example/graphql -H 'content-type: application/json' --data-raw '{"query":"{ countries { code } }","variables":{"n":1},"operationName":null}'"#,
+    );
+    assert_eq!(
+        request.body,
+        Body::GraphQl {
+            query: "{ countries { code } }".into(),
+            variables: "{\n  \"n\": 1\n}".into(),
+        }
+    );
+    assert!(request.headers.is_empty());
+
+    let template =
+        Request::new(Method::Post, "https://x.example/graphql").with_body(Body::GraphQl {
+            query: "{ a }".into(),
+            variables: "{\"id\": {{id}}}".into(),
+        });
+    assert!(
+        to_curl(&template)
+            .ends_with(r#"--data-raw '{"query":"{ a }","variables":{"id": {{id}}}}'"#)
+    );
+}
+
+#[test]
 fn curl_detection() {
     assert!(is_curl("  curl https://x"));
     assert!(is_curl("CURL.exe https://x"));
@@ -217,6 +242,10 @@ fn export_then_parse_round_trips() {
         Request::new(Method::Patch, "https://example.com/doc").with_body(Body::Raw {
             text: "<a>'</a>".into(),
             content_type: "application/xml".into(),
+        }),
+        Request::new(Method::Post, "https://example.com/graphql").with_body(Body::GraphQl {
+            query: "query Q($id: ID!) {\n  user(id: $id) { name }\n}".into(),
+            variables: "{\n  \"id\": \"42\"\n}".into(),
         }),
         Request::new(Method::Post, "https://example.com/blob").with_body(Body::Binary {
             path: "data.bin".into(),

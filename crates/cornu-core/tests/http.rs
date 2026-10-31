@@ -365,3 +365,35 @@ async fn api_key_in_query_is_appended() {
         });
     client().send(&request).await.unwrap();
 }
+
+#[tokio::test]
+async fn graphql_body_is_sent_as_json_with_resolved_variables() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(header("content-type", "application/json"))
+        .and(body_string(
+            r#"{"query":"query ($code: ID!) { country(code: $code) { name } }","variables":{"code":"FR","limit":3}}"#,
+        ))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let request = Request::new(Method::Post, server.uri()).with_body(Body::GraphQl {
+        query: "query ($code: ID!) { country(code: $code) { name } }".into(),
+        variables: r#"{"code": "{{code}}", "limit": {{limit}}}"#.into(),
+    });
+    let variables = Variables::new().with_layer([("code", "FR"), ("limit", "3")]);
+    let resolved = request.resolve(&variables);
+    assert!(resolved.unresolved.is_empty());
+    assert_eq!(client().send(&resolved.request).await.unwrap().status, 200);
+
+    let broken = Request::new(Method::Post, server.uri()).with_body(Body::GraphQl {
+        query: "{ a }".into(),
+        variables: "{ nope".into(),
+    });
+    assert!(matches!(
+        client().send(&broken).await,
+        Err(SendError::InvalidGraphqlVariables(_))
+    ));
+}

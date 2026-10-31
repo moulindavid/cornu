@@ -109,6 +109,10 @@ impl Request {
                 }
             }
             Body::Binary { path, .. } => *path = PathBuf::from(sub(&path.to_string_lossy())),
+            Body::GraphQl { query, variables } => {
+                *query = sub(query);
+                *variables = sub(variables);
+            }
         }
         Resolved {
             request,

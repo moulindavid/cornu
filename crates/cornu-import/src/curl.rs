@@ -329,6 +329,12 @@ impl Parser {
             body = self.data_body();
         }
 
+        if let Body::Json { text } = &body
+            && let Some(graphql) = Body::graphql_from_payload(text)
+        {
+            body = graphql;
+        }
+
         let method = match self.method.take() {
             Some(method) => Method::from_str(&method)
                 .map_err(|error| ImportError::Unsupported(error.to_string()))?,
@@ -586,7 +592,8 @@ pub fn to_curl(request: &Request) -> String {
             }
         }
     }
-    if let Body::Raw { .. } | Body::Json { .. } | Body::Binary { .. } = request.body
+    if let Body::Raw { .. } | Body::Json { .. } | Body::Binary { .. } | Body::GraphQl { .. } =
+        request.body
         && let Some(content_type) = request.body.content_type()
         && !request.has_header("content-type")
     {
@@ -617,6 +624,14 @@ pub fn to_curl(request: &Request) -> String {
             }
         }
         Body::Binary { path, .. } => option("--data-binary", &format!("@{}", path.display())),
+        Body::GraphQl { query, variables } => {
+            // Variables that are not valid JSON yet are still worth exporting as typed.
+            let payload = Body::graphql_payload(query, variables).unwrap_or_else(|_| {
+                let query = serde_json::Value::from(query.as_str());
+                format!(r#"{{"query":{query},"variables":{}}}"#, variables.trim())
+            });
+            option("--data-raw", &payload);
+        }
     }
 
     std::iter::once(first.join(" "))
