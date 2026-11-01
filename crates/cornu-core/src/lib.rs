@@ -1,6 +1,7 @@
 mod auth;
 mod body;
 mod environment;
+pub mod graphql;
 mod http;
 pub mod key_value;
 mod method;

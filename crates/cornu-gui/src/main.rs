@@ -8,6 +8,7 @@ mod history;
 mod import;
 mod project;
 mod response;
+mod schema;
 mod tree;
 mod widgets;
 mod worker;

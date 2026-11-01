@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use cornu_core::{ApiKeyLocation, Auth, Body, KeyValue, Method, MultipartPart, PartValue, Request};
 use eframe::egui;
 
+use crate::schema::SchemaPanel;
 use crate::widgets::{column_widths, count_label, key_value_table};
 
 const RAW_CONTENT_TYPES: [&str; 6] = [
@@ -27,6 +28,7 @@ enum Tab {
 pub struct EditorState {
     tab: Tab,
     json_error: Option<String>,
+    pub schema: SchemaPanel,
 }
 
 pub fn request_editor(
@@ -218,17 +220,26 @@ fn body_editor(ui: &mut egui::Ui, id: egui::Id, body: &mut Body, state: &mut Edi
                 path_picker(ui, path, f32::INFINITY);
             });
         }
-        Body::GraphQl { query, variables } => graphql_editor(ui, query, variables, state),
+        Body::GraphQl { query, variables } => graphql_editor(ui, id, query, variables, state),
     }
 }
 
 fn graphql_editor(
     ui: &mut egui::Ui,
+    id: egui::Id,
     query: &mut String,
     variables: &mut String,
     state: &mut EditorState,
 ) {
-    ui.columns(2, |columns| {
+    ui.horizontal(|ui| state.schema.toolbar(ui));
+    let explorer = state.schema.shows_explorer();
+    ui.columns(if explorer { 3 } else { 2 }, |columns| {
+        if explorer {
+            let height = columns[0].spacing().interact_size.y * 12.0;
+            state
+                .schema
+                .explorer(&mut columns[2], id.with("schema"), height);
+        }
         columns[0].label("Query");
         code_area(&mut columns[0], query);
 
@@ -559,6 +570,7 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("must be a JSON object"), "{text}");
+        assert!(text.contains("Fetch schema"), "{text}");
     }
 
     #[test]
