@@ -9,7 +9,7 @@ and plain text files you can commit to git.
 
 ## Goals
 
-- HTTP(S), GraphQL (query and variables, schema introspection and explorer), and later WebSocket, SSE and gRPC
+- HTTP(S), GraphQL (query and variables, schema explorer, field autocompletion), and later WebSocket, SSE and gRPC
 - Collections stored as git-friendly TOML files, secrets kept out of git
 - Environments with variables, auth inherited from folders (set a Bearer token once)
 - Import from Postman collections and environments, OpenAPI / Swagger and cURL

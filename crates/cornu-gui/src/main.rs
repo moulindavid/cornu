@@ -7,6 +7,7 @@ mod highlight;
 mod history;
 mod import;
 mod project;
+mod query_editor;
 mod response;
 mod schema;
 mod tree;

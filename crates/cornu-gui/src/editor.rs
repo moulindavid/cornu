@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use cornu_core::{ApiKeyLocation, Auth, Body, KeyValue, Method, MultipartPart, PartValue, Request};
 use eframe::egui;
 
+use crate::query_editor::{CompletionPopup, query_editor};
 use crate::schema::SchemaPanel;
 use crate::widgets::{column_widths, count_label, key_value_table};
 
@@ -29,6 +30,7 @@ pub struct EditorState {
     tab: Tab,
     json_error: Option<String>,
     pub schema: SchemaPanel,
+    completion: CompletionPopup,
 }
 
 pub fn request_editor(
@@ -240,8 +242,19 @@ fn graphql_editor(
                 .schema
                 .explorer(&mut columns[2], id.with("schema"), height);
         }
-        columns[0].label("Query");
-        code_area(&mut columns[0], query);
+        columns[0].horizontal(|ui| {
+            ui.label("Query");
+            if state.schema.schema().is_some() {
+                ui.weak("Ctrl+Space for suggestions");
+            }
+        });
+        query_editor(
+            &mut columns[0],
+            id.with("query"),
+            query,
+            state.schema.schema(),
+            &mut state.completion,
+        );
 
         let ui = &mut columns[1];
         ui.horizontal(|ui| {

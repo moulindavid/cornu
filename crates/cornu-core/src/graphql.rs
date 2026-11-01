@@ -1,3 +1,5 @@
+pub mod completion;
+
 use std::fmt;
 
 use serde::{Deserialize, Deserializer};
