@@ -1,3 +1,4 @@
+use cornu_core::graphql::completion::{SuggestionKind, complete};
 use cornu_core::graphql::{IntrospectionError, Schema, TypeKind, introspect};
 use cornu_core::{Auth, ClientOptions, HttpClient, Method, Request};
 use serde_json::json;
@@ -110,4 +111,111 @@ async fn introspection_uses_the_request_endpoint_and_auth() {
         introspect(&client, &request).await,
         Err(IntrospectionError::Status(401))
     ));
+}
+
+fn suggest(schema: &Schema, marked: &str) -> Vec<String> {
+    let cursor = marked.find('|').unwrap();
+    let query = marked.replace('|', "");
+    complete(schema, &query, cursor)
+        .items
+        .into_iter()
+        .map(|item| item.insert)
+        .collect()
+}
+
+#[test]
+fn fields_follow_the_selection_path() {
+    let schema = countries();
+    assert_eq!(suggest(&schema, "{ cou| }"), ["countries", "country"]);
+    assert_eq!(
+        suggest(&schema, "{ countries { languages { na| } } }"),
+        ["name", "native", "__typename"],
+        "prefix matches first"
+    );
+    assert!(suggest(&schema, "query Q($c: ID!) { country(code: $c) { cap| } }") == ["capital"]);
+    let nested = suggest(&schema, "{ countries { languages { | } } }");
+    assert_eq!(
+        nested,
+        ["code", "countries", "name", "native", "rtl", "__typename"]
+    );
+    assert_eq!(
+        suggest(&schema, "{ countries { first: lang|"),
+        ["languages"],
+        "aliases"
+    );
+    assert_eq!(
+        suggest(&schema, "{ countries { name continent { code } st| } }"),
+        ["states"],
+        "back in the parent after a nested selection"
+    );
+    assert_eq!(
+        suggest(&schema, "fragment F on Country { emo| }"),
+        ["emoji", "emojiU"]
+    );
+    assert_eq!(
+        suggest(
+            &schema,
+            "{ country(code: \"FR\") @include(if: true) { pho| } }"
+        ),
+        ["phone", "phones"]
+    );
+}
+
+#[test]
+fn arguments_type_conditions_and_quiet_places() {
+    let schema = countries();
+    assert_eq!(suggest(&schema, "{ country(|) }"), ["code: "]);
+    assert_eq!(
+        suggest(&schema, "{ countries(filter: { code: { eq: \"FR\" } } |) }"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        suggest(&schema, "{ countries { ... on Cont| } }"),
+        ["Continent"]
+    );
+    for quiet in [
+        "{ country(code: \"cou|",
+        "# cou|",
+        "{ country(code: $co|",
+        "{ countries { 1|",
+        "{ countries { name|",
+    ] {
+        assert!(suggest(&schema, quiet).is_empty(), "{quiet}");
+    }
+    let completion = complete(&schema, "{ cou }", 5);
+    assert_eq!(completion.start, 2);
+    assert_eq!(completion.items[0].detail, "[Country!]!");
+    assert_eq!(completion.items[0].kind, SuggestionKind::Field);
+}
+
+#[test]
+fn enum_arguments_and_mutations() {
+    let text = json!({"__schema": {
+        "queryType": {"name": "Query"},
+        "mutationType": {"name": "Mutation"},
+        "types": [
+            {"kind": "OBJECT", "name": "Query", "fields": []},
+            {"kind": "OBJECT", "name": "Mutation", "fields": [
+                {"name": "setRole", "type": {"kind": "SCALAR", "name": "Boolean"}, "args": [
+                    {"name": "user", "type": {"kind": "SCALAR", "name": "ID"}},
+                    {"name": "role", "type": {"kind": "NON_NULL", "ofType": {"kind": "ENUM", "name": "Role"}}}
+                ]}
+            ]},
+            {"kind": "ENUM", "name": "Role", "enumValues": [
+                {"name": "ADMIN"}, {"name": "ROOT", "isDeprecated": true}
+            ]}
+        ]
+    }})
+    .to_string();
+    let schema = Schema::parse(&text).unwrap();
+    assert_eq!(suggest(&schema, "mutation { set| }"), ["setRole"]);
+    assert_eq!(
+        suggest(&schema, "mutation { setRole(user: \"1\" |) }"),
+        ["role: "]
+    );
+    assert_eq!(
+        suggest(&schema, "mutation { setRole(role: |) }"),
+        ["ADMIN", "ROOT"]
+    );
+    assert_eq!(suggest(&schema, "mutation { setRole(role: R|) }"), ["ROOT"]);
 }

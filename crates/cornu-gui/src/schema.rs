@@ -35,6 +35,10 @@ impl SchemaPanel {
         self.error = None;
     }
 
+    pub fn schema(&self) -> Option<&Schema> {
+        self.schema.as_ref()
+    }
+
     pub fn shows_explorer(&self) -> bool {
         self.visible && self.schema.is_some()
     }
