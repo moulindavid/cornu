@@ -1,0 +1,193 @@
+use std::time::{Duration, Instant};
+
+use cornu_core::runner::{
+    CancelToken, Row, RunOptions, RunPlan, RunSummary, Step, StepResult, run,
+};
+use cornu_core::{ClientOptions, HttpClient, Method, Request, SendError, Variables};
+use tokio::sync::mpsc;
+use wiremock::matchers::{method, path, path_regex};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+fn client() -> HttpClient {
+    HttpClient::new(&ClientOptions::default()).unwrap()
+}
+
+fn row(pairs: &[(&str, &str)]) -> Row {
+    pairs
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
+}
+
+fn step(url: String, variables: &[(&str, &str)]) -> Step {
+    Step {
+        request: Request::new(Method::Get, url),
+        variables: Variables::new().with_layer(variables.iter().copied()),
+    }
+}
+
+async fn execute(plan: RunPlan, cancel: &CancelToken) -> (RunSummary, Vec<StepResult>) {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let summary = run(&client(), plan, cancel, tx).await;
+    let mut results = Vec::new();
+    while let Ok(result) = rx.try_recv() {
+        results.push(result);
+    }
+    results.sort_by_key(|result| (result.iteration, result.step));
+    (summary, results)
+}
+
+async fn slow_server(delay: Duration) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_delay(delay))
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn each_row_runs_every_step_with_its_variables() {
+    let server = MockServer::start().await;
+    Mock::given(path_regex("^/users/(1|2)$"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    Mock::given(path("/users/missing"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    Mock::given(path_regex("^/audit"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let base = server.uri();
+    let plan = RunPlan {
+        steps: vec![
+            step(
+                "{{base}}/users/{{id}}".into(),
+                &[("base", &base), ("id", "default")],
+            ),
+            step("{{base}}/audit/{{id}}/{{other}}".into(), &[("base", &base)]),
+        ],
+        rows: vec![
+            row(&[("id", "1")]),
+            row(&[("id", "2")]),
+            row(&[("id", "missing")]),
+        ],
+        options: RunOptions {
+            concurrency: 2,
+            ..Default::default()
+        },
+    };
+    assert_eq!(plan.total(), 6);
+    let (summary, results) = execute(plan, &CancelToken::default()).await;
+
+    assert_eq!(
+        (summary.succeeded, summary.failed, summary.errors),
+        (5, 1, 0)
+    );
+    assert_eq!(summary.skipped, 0);
+    assert!(!summary.cancelled);
+    let urls: Vec<_> = results
+        .iter()
+        .map(|result| result.request.url.trim_start_matches(&base))
+        .collect();
+    assert_eq!(
+        urls,
+        [
+            "/users/1",
+            "/audit/1/{{other}}",
+            "/users/2",
+            "/audit/2/{{other}}",
+            "/users/missing",
+            "/audit/missing/{{other}}"
+        ]
+    );
+    assert_eq!(results[1].unresolved, ["other"]);
+    assert_eq!(results[4].outcome.as_ref().unwrap().status, 404);
+}
+
+#[tokio::test]
+async fn no_rows_is_one_iteration_and_errors_are_counted() {
+    let plan = RunPlan {
+        steps: vec![step("http://127.0.0.1:9/{{x}}".into(), &[("x", "a")])],
+        rows: Vec::new(),
+        options: RunOptions::default(),
+    };
+    let (summary, results) = execute(plan, &CancelToken::default()).await;
+    assert_eq!((summary.errors, summary.skipped), (1, 0));
+    assert_eq!(results[0].request.url, "http://127.0.0.1:9/a");
+    assert!(matches!(results[0].outcome, Err(SendError::Connect(_))));
+}
+
+#[tokio::test]
+async fn concurrency_limits_iterations_in_flight() {
+    let server = slow_server(Duration::from_millis(150)).await;
+    let plan = |concurrency| RunPlan {
+        steps: vec![step(server.uri(), &[])],
+        rows: vec![Row::new(); 4],
+        options: RunOptions {
+            concurrency,
+            ..Default::default()
+        },
+    };
+    let (sequential, _) = execute(plan(1), &CancelToken::default()).await;
+    assert!(
+        sequential.elapsed >= Duration::from_millis(600),
+        "{sequential:?}"
+    );
+    let (parallel, _) = execute(plan(4), &CancelToken::default()).await;
+    assert_eq!(parallel.succeeded, 4);
+    assert!(
+        parallel.elapsed < Duration::from_millis(450),
+        "{parallel:?}"
+    );
+}
+
+#[tokio::test]
+async fn delay_spaces_requests_but_not_after_the_last() {
+    let server = slow_server(Duration::ZERO).await;
+    let plan = RunPlan {
+        steps: vec![step(server.uri(), &[]), step(server.uri(), &[])],
+        rows: vec![Row::new(); 2],
+        options: RunOptions {
+            concurrency: 1,
+            delay: Duration::from_millis(200),
+        },
+    };
+    let (summary, _) = execute(plan, &CancelToken::default()).await;
+    assert_eq!(summary.succeeded, 4);
+    assert!(summary.elapsed >= Duration::from_millis(600), "{summary:?}");
+    assert!(summary.elapsed < Duration::from_millis(780), "{summary:?}");
+}
+
+#[tokio::test]
+async fn cancelling_stops_requests_in_flight_and_skips_the_rest() {
+    let server = slow_server(Duration::from_secs(5)).await;
+    let plan = RunPlan {
+        steps: vec![step(server.uri(), &[]), step(server.uri(), &[])],
+        rows: vec![Row::new(); 3],
+        options: RunOptions {
+            concurrency: 2,
+            ..Default::default()
+        },
+    };
+    let cancel = CancelToken::default();
+    let canceller = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        canceller.cancel();
+    });
+    let started = Instant::now();
+    let (summary, results) = execute(plan, &cancel).await;
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(summary.cancelled);
+    assert_eq!((summary.errors, summary.skipped), (2, 4));
+    assert!(
+        results
+            .iter()
+            .all(|result| matches!(result.outcome, Err(SendError::Cancelled)))
+    );
+}
