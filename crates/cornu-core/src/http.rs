@@ -47,6 +47,8 @@ pub enum SendError {
     InvalidGraphqlVariables(String),
     #[error("request timed out")]
     Timeout,
+    #[error("cancelled")]
+    Cancelled,
     #[error("connection failed: {0}")]
     Connect(String),
     #[error("{0}")]

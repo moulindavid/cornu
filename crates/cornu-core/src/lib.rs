@@ -7,6 +7,7 @@ pub mod key_value;
 mod method;
 mod request;
 mod response;
+pub mod runner;
 mod variables;
 
 pub use auth::{ApiKeyLocation, Auth};
