@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use cornu_core::runner::data::{ValueList, rows_from_lists};
 use cornu_core::runner::{
     CancelToken, Row, RunOptions, RunPlan, RunSummary, Step, StepResult, run,
 };
@@ -190,4 +191,28 @@ async fn cancelling_stops_requests_in_flight_and_skips_the_rest() {
             .iter()
             .all(|result| matches!(result.outcome, Err(SendError::Cancelled)))
     );
+}
+
+#[tokio::test]
+async fn a_pasted_list_drives_the_iterations() {
+    let server = MockServer::start().await;
+    Mock::given(path_regex("^/users/(7|8|9)$"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    let plan = RunPlan {
+        steps: vec![step(
+            format!("{}/users/{{{{id}}}}", server.uri()),
+            &[("id", "0")],
+        )],
+        rows: rows_from_lists(&[ValueList::new("id", "7\n8\n\n9\n")]).unwrap(),
+        options: RunOptions::default(),
+    };
+    let (summary, results) = execute(plan, &CancelToken::default()).await;
+    assert_eq!(summary.succeeded, 3);
+    let ids: Vec<_> = results
+        .iter()
+        .map(|result| result.request.url.rsplit('/').next().unwrap())
+        .collect();
+    assert_eq!(ids, ["7", "8", "9"]);
 }
