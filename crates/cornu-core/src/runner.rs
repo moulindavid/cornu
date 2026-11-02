@@ -1,6 +1,8 @@
 //! Runs a sequence of requests once per data row: rows run side by side up to a
 //! concurrency limit, the steps of a row run in order.
 
+pub mod data;
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
