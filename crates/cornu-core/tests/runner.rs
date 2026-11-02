@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use cornu_core::runner::data::{ValueList, rows_from_lists};
+use cornu_core::runner::data::{CsvData, ValueList, rows_from_lists};
 use cornu_core::runner::{
     CancelToken, Row, RunOptions, RunPlan, RunSummary, Step, StepResult, run,
 };
@@ -215,4 +215,25 @@ async fn a_pasted_list_drives_the_iterations() {
         .map(|result| result.request.url.rsplit('/').next().unwrap())
         .collect();
     assert_eq!(ids, ["7", "8", "9"]);
+}
+
+#[tokio::test]
+async fn csv_rows_drive_the_iterations() {
+    let server = MockServer::start().await;
+    Mock::given(path_regex("^/users/(1|2)/(ada|grace)$"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    let csv = CsvData::new("id\tname\n1\tada\n2\tgrace\n", true);
+    let plan = RunPlan {
+        steps: vec![step(
+            format!("{}/users/{{{{id}}}}/{{{{name}}}}", server.uri()),
+            &[],
+        )],
+        rows: csv.rows().unwrap(),
+        options: RunOptions::default(),
+    };
+    let (summary, results) = execute(plan, &CancelToken::default()).await;
+    assert_eq!(summary.succeeded, 2);
+    assert!(results[1].request.url.ends_with("/users/2/grace"));
 }
