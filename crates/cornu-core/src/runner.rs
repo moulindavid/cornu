@@ -9,7 +9,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
 
-use crate::{Captured, HttpClient, Request, Response, SendError, Variables, capture, store};
+use crate::{
+    AssertionResult, Captured, HttpClient, Request, Response, SendError, Variables, capture, check,
+    passed, store,
+};
 
 /// The variables one iteration adds on top of each step's own, as `(name, value)`.
 pub type Row = Vec<(String, String)>;
@@ -65,12 +68,22 @@ pub struct StepResult {
     pub unresolved: Vec<String>,
     pub outcome: Result<Response, SendError>,
     pub captured: Vec<Captured>,
+    pub assertions: Vec<AssertionResult>,
+}
+
+impl StepResult {
+    pub fn passed(&self) -> bool {
+        self.outcome
+            .as_ref()
+            .is_ok_and(|response| passed(response, &self.assertions))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunSummary {
+    /// Answered with a 2xx status, or passing every assertion when the request has some.
     pub succeeded: usize,
-    /// Answered with a non-2xx status.
+    /// Answered, but with a non-2xx status or a failed assertion.
     pub failed: usize,
     /// Never answered: connection errors, timeouts, cancelled requests.
     pub errors: usize,
@@ -151,13 +164,16 @@ pub async fn run(
                     outcome = client.send(&resolved.request) => outcome,
                     _ = cancel.cancelled() => Err(SendError::Cancelled),
                 };
-                let captured = match &outcome {
-                    Ok(response) => capture(&step.request.captures, response),
-                    Err(_) => Vec::new(),
+                let (captured, assertions) = match &outcome {
+                    Ok(response) => (
+                        capture(&step.request.captures, response),
+                        check(&resolved.request.assertions, response),
+                    ),
+                    Err(_) => (Vec::new(), Vec::new()),
                 };
                 store(&mut captures, &captured);
                 let _ = counts.send(match &outcome {
-                    Ok(response) if response.is_success() => Count::Succeeded,
+                    Ok(response) if passed(response, &assertions) => Count::Succeeded,
                     Ok(_) => Count::Failed,
                     Err(_) => Count::Error,
                 });
@@ -168,6 +184,7 @@ pub async fn run(
                     unresolved: resolved.unresolved,
                     outcome,
                     captured,
+                    assertions,
                 });
                 let last = last_iteration && index + 1 == steps.len();
                 if !options.delay.is_zero() && !last {

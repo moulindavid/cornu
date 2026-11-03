@@ -3,14 +3,14 @@ use std::path::PathBuf;
 
 use cornu_core::runner::data::{CsvData, DataError, ValueList, guess_header, rows_from_lists};
 use cornu_core::runner::{Row, RunOptions, RunSummary};
-use cornu_core::{Captured, Method, Response};
+use cornu_core::{AssertionResult, Captured, Method, Response};
 use cornu_storage::{Folder, Item, RequestEntry};
 use eframe::egui;
 
 use crate::format;
 use crate::response::{ResponseView, status_color};
 use crate::tree::method_color;
-use crate::widgets::{captured_lines, show_in, split_rects};
+use crate::widgets::{assertion_lines, captured_lines, show_in, split_rects, tests_label};
 use crate::worker::{DocId, RunEvent, RunHandle};
 
 const PREVIEW_ROWS: usize = 8;
@@ -71,8 +71,8 @@ impl Filter {
     fn label(self) -> &'static str {
         match self {
             Filter::All => "All",
-            Filter::Success => "2xx",
-            Filter::Failed => "Other status",
+            Filter::Success => "Passed",
+            Filter::Failed => "Failed",
             Filter::Errors => "Errors",
         }
     }
@@ -80,8 +80,8 @@ impl Filter {
     fn accepts(self, row: &RunRow) -> bool {
         match (self, &row.outcome) {
             (Filter::All, _) => true,
-            (Filter::Success, Ok(response)) => response.is_success(),
-            (Filter::Failed, Ok(response)) => !response.is_success(),
+            (Filter::Success, Ok(_)) => row.passed,
+            (Filter::Failed, Ok(_)) => !row.passed,
             (Filter::Errors, Err(_)) => true,
             _ => false,
         }
@@ -98,6 +98,9 @@ pub struct RunRow {
     pub unresolved: Vec<String>,
     pub outcome: Result<Response, String>,
     pub captured: Vec<Captured>,
+    pub assertions: Vec<AssertionResult>,
+    /// 2xx, or every assertion passed when the request has some.
+    pub passed: bool,
 }
 
 struct Running {
@@ -198,6 +201,7 @@ impl RunnerTab {
         for event in running.handle.events.try_iter() {
             match event {
                 RunEvent::Result(result) => {
+                    let passed = result.passed();
                     let row = RunRow {
                         iteration: result.iteration,
                         step: result.step,
@@ -207,6 +211,8 @@ impl RunnerTab {
                         unresolved: result.unresolved,
                         outcome: result.outcome.map_err(|error| error.to_string()),
                         captured: result.captured,
+                        assertions: result.assertions,
+                        passed,
                     };
                     let key = (row.iteration, row.step);
                     let index = self
@@ -525,9 +531,9 @@ impl RunnerTab {
             .filter(|&index| self.filter.accepts(&self.rows[index]))
             .collect();
         let height = ui.spacing().interact_size.y;
-        let widths = [48.0, 180.0, 70.0, 80.0, 80.0];
+        let widths = [48.0, 180.0, 70.0, 64.0, 80.0, 80.0];
         ui.horizontal(|ui| {
-            for (header, width) in ["#", "Request", "Status", "Time", "Size"]
+            for (header, width) in ["#", "Request", "Status", "Tests", "Time", "Size"]
                 .iter()
                 .zip(widths)
             {
@@ -559,8 +565,9 @@ impl RunnerTab {
                             ),
                         };
                         cell(ui, widths[2], height, status);
-                        cell(ui, widths[3], height, time);
-                        cell(ui, widths[4], height, size);
+                        cell(ui, widths[3], height, tests_label(ui, &row.assertions));
+                        cell(ui, widths[4], height, time);
+                        cell(ui, widths[5], height, size);
                         ui.add(egui::Label::new(format!("{} {}", row.method, row.url)).truncate());
                     });
                     let rect = line.response.rect.with_max_x(ui.max_rect().right());
@@ -620,6 +627,7 @@ impl RunnerTab {
             );
         }
         captured_lines(ui, &row.captured);
+        assertion_lines(ui, &row.assertions);
         match (&row.outcome, &mut self.view) {
             (Err(error), _) => {
                 ui.colored_label(ui.visuals().error_fg_color, error);
@@ -692,9 +700,9 @@ fn plural(count: usize, word: &str) -> String {
 }
 
 fn summary_text(summary: &RunSummary) -> String {
-    let mut parts = vec![format!("{} succeeded", summary.succeeded)];
+    let mut parts = vec![format!("{} passed", summary.succeeded)];
     if summary.failed > 0 {
-        parts.push(format!("{} other status", summary.failed));
+        parts.push(format!("{} failed", summary.failed));
     }
     if summary.errors > 0 {
         parts.push(format!("{} errors", summary.errors));
@@ -726,6 +734,15 @@ fn row_fields(row: &RunRow) -> (Option<u16>, String, Option<u128>, Option<usize>
     }
 }
 
+/// `passed/total`, empty without assertions.
+fn tests_count(results: &[AssertionResult]) -> String {
+    if results.is_empty() {
+        return String::new();
+    }
+    let passed = results.iter().filter(|result| result.passed()).count();
+    format!("{passed}/{}", results.len())
+}
+
 fn export_csv(rows: &[&RunRow]) -> Result<String, String> {
     let mut writer = csv::Writer::from_writer(Vec::new());
     let header = [
@@ -734,6 +751,7 @@ fn export_csv(rows: &[&RunRow]) -> Result<String, String> {
         "method",
         "url",
         "status",
+        "tests",
         "error",
         "time_ms",
         "size",
@@ -748,6 +766,7 @@ fn export_csv(rows: &[&RunRow]) -> Result<String, String> {
             row.method.to_string(),
             row.url.clone(),
             status.map(|s| s.to_string()).unwrap_or_default(),
+            tests_count(&row.assertions),
             error,
             time.map(|t| t.to_string()).unwrap_or_default(),
             size.map(|s| s.to_string()).unwrap_or_default(),
@@ -789,6 +808,13 @@ fn export_json(rows: &[&RunRow]) -> String {
                 "size": size,
                 "unresolved": row.unresolved,
                 "captured": captured,
+                "passed": row.passed,
+                "assertions": row.assertions.iter().map(|result| serde_json::json!({
+                    "assertion": result.description,
+                    "passed": result.passed(),
+                    "actual": result.actual,
+                    "error": result.error,
+                })).collect::<Vec<_>>(),
                 "body": body,
             })
         })
@@ -846,6 +872,16 @@ mod tests {
                 ]
             } else {
                 Vec::new()
+            },
+            assertions: match (&outcome, (iteration, step)) {
+                (Ok(response), (1, 0)) => cornu_core::check(
+                    &[
+                        cornu_core::Assertion::status(404),
+                        cornu_core::Assertion::body("", cornu_core::Operator::Contains, "gone"),
+                    ],
+                    response,
+                ),
+                _ => Vec::new(),
             },
             outcome,
         }))
@@ -909,13 +945,17 @@ mod tests {
         assert_eq!(
             Filter::ALL.map(count),
             [4, 2, 1, 1],
-            "all, 2xx, other status, errors"
+            "all, passed, failed, errors"
         );
+        assert_eq!(tab.rows[2].assertions.len(), 2);
+        assert!(!tab.rows[2].passed, "a failed test fails the 404");
 
         let shapes = render(&mut tab, &[]);
         for expected in [
-            "2xx (2)",
+            "Passed (2)",
+            "Failed (1)",
             "Errors (1)",
+            "✘ 1/2",
             "Done in 80 ms",
             "404",
             "Audit",
@@ -937,6 +977,13 @@ mod tests {
         tab.select(2);
         let shapes = render(&mut tab, &[]);
         assert!(shapes.contains("missing"), "{shapes}");
+        for expected in [
+            "Tests: 1/2 passed",
+            "✔ status equals 404",
+            "✘ body contains gone: got missing",
+        ] {
+            assert!(shapes.contains(expected), "{expected} in {shapes}");
+        }
         tab.select(1);
         assert!(render(&mut tab, &[]).contains("request timed out"));
         tab.select(1);
@@ -951,12 +998,16 @@ mod tests {
         let lines: Vec<_> = csv.lines().collect();
         assert_eq!(
             lines[0],
-            "iteration,request,method,url,status,error,time_ms,size"
+            "iteration,request,method,url,status,tests,error,time_ms,size"
         );
-        assert_eq!(lines[1], "1,Get user,GET,https://x.example/0/0,200,,12,8");
+        assert_eq!(lines[1], "1,Get user,GET,https://x.example/0/0,200,,,12,8");
         assert_eq!(
             lines[2],
-            "1,Audit,GET,https://x.example/0/1,,request timed out,,"
+            "1,Audit,GET,https://x.example/0/1,,,request timed out,,"
+        );
+        assert_eq!(
+            lines[3],
+            "2,Get user,GET,https://x.example/1/0,404,1/2,,12,7"
         );
         assert_eq!(lines.len(), 5);
 
@@ -966,6 +1017,10 @@ mod tests {
         assert_eq!(json[0]["captured"][0]["value"], "abc");
         assert_eq!(json[0]["captured"][1]["error"], "the body is not JSON");
         assert_eq!(json[1]["captured"], serde_json::json!([]));
+        assert_eq!(json[0]["passed"], true);
+        assert_eq!(json[2]["passed"], false);
+        assert_eq!(json[2]["assertions"][1]["error"], "got missing");
+        assert_eq!(json[2]["assertions"][0]["actual"], "404");
         assert_eq!(json[1]["error"], "request timed out");
         assert_eq!(json[1]["status"], serde_json::Value::Null);
         assert_eq!(json[2]["iteration"], 2);

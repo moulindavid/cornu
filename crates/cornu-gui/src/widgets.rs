@@ -1,4 +1,4 @@
-use cornu_core::{Captured, KeyValue, Segment, Variables, is_dynamic, segments};
+use cornu_core::{AssertionResult, Captured, KeyValue, Segment, Variables, is_dynamic, segments};
 use eframe::egui;
 
 pub fn key_value_table(ui: &mut egui::Ui, id: egui::Id, rows: &mut Vec<KeyValue>) {
@@ -259,5 +259,56 @@ pub fn captured_lines(ui: &mut egui::Ui, captured: &[Captured]) {
                 );
             }
         }
+    }
+}
+
+pub fn assertion_lines(ui: &mut egui::Ui, results: &[AssertionResult]) {
+    if results.is_empty() {
+        return;
+    }
+    let (passed, failed) = assertion_colors(ui.visuals());
+    let count = results.iter().filter(|result| result.passed()).count();
+    ui.strong(format!("Tests: {count}/{} passed", results.len()));
+    for result in results {
+        match &result.error {
+            None => ui.colored_label(passed, format!("✔ {}", result.description)),
+            Some(error) => ui.colored_label(
+                failed,
+                format!(
+                    "✘ {}: {}",
+                    result.description,
+                    crate::format::truncate(error, 120)
+                ),
+            ),
+        };
+    }
+}
+
+/// `✔ 2/2` or `✘ 1/2`; empty without assertions.
+pub fn tests_label(ui: &egui::Ui, results: &[AssertionResult]) -> egui::RichText {
+    if results.is_empty() {
+        return egui::RichText::new("");
+    }
+    let (passed_color, failed_color) = assertion_colors(ui.visuals());
+    let passed = results.iter().filter(|result| result.passed()).count();
+    let (mark, color) = if passed == results.len() {
+        ("✔", passed_color)
+    } else {
+        ("✘", failed_color)
+    };
+    egui::RichText::new(format!("{mark} {passed}/{}", results.len())).color(color)
+}
+
+fn assertion_colors(visuals: &egui::Visuals) -> (egui::Color32, egui::Color32) {
+    if visuals.dark_mode {
+        (
+            egui::Color32::from_rgb(0xa6, 0xe3, 0xa1),
+            visuals.error_fg_color,
+        )
+    } else {
+        (
+            egui::Color32::from_rgb(0x40, 0xa0, 0x2b),
+            visuals.error_fg_color,
+        )
     }
 }

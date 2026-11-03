@@ -285,3 +285,35 @@ async fn captures_feed_later_steps_of_the_same_iteration() {
     assert!(captured[1].value.is_err());
     assert!(results[1].captured.is_empty());
 }
+
+#[tokio::test]
+async fn assertions_decide_whether_a_step_succeeded() {
+    use cornu_core::{Assertion, Operator};
+
+    let server = MockServer::start().await;
+    Mock::given(path_regex("^/items/(1|2)$"))
+        .respond_with(|request: &wiremock::Request| {
+            let id = request.url.path().rsplit('/').next().unwrap().to_owned();
+            ResponseTemplate::new(404).set_body_json(serde_json::json!({ "id": id }))
+        })
+        .mount(&server)
+        .await;
+
+    let base = server.uri();
+    let mut probe = step("{{base}}/items/{{id}}".into(), &[("base", &base)]);
+    probe.request = probe
+        .request
+        .with_assertion(Assertion::status(404))
+        .with_assertion(Assertion::body("$.id", Operator::Equals, "1"));
+    let plan = RunPlan {
+        steps: vec![probe],
+        rows: vec![row(&[("id", "1")]), row(&[("id", "2")])],
+        options: RunOptions::default(),
+    };
+
+    let (summary, results) = execute(plan, &CancelToken::default()).await;
+    assert_eq!((summary.succeeded, summary.failed), (1, 1));
+    assert!(results[0].passed());
+    assert!(!results[1].passed());
+    assert_eq!(results[1].assertions[1].error.as_deref(), Some("got 2"));
+}

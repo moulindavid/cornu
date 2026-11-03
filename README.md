@@ -15,6 +15,7 @@ and plain text files you can commit to git.
 - Import from Postman collections and environments, OpenAPI / Swagger and cURL
 - Data-driven runs: replace a variable by a list of values or a CSV file (with or without header)
 - Request chaining: capture response values (JSONPath, headers, status) into variables
+- Response tests: assert on status, headers, JSONPath values, time and size
 - Native desktop GUI built with [egui](https://github.com/emilk/egui)
 
 ## Building
