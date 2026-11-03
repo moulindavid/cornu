@@ -15,11 +15,16 @@ path = "src/main.rs"
 cornu-core.workspace = true
 cornu-import.workspace = true
 cornu-storage.workspace = true
+csv.workspace = true
 eframe = { workspace = true, features = ["persistence"] }
 rfd.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+wiremock.workspace = true
 
 [lints]
 workspace = true

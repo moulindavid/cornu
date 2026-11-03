@@ -12,6 +12,7 @@ pub enum TreeAction {
     Rename(PathBuf, String),
     Duplicate(PathBuf),
     Delete(PathBuf),
+    Run(PathBuf),
 }
 
 struct Renaming {
@@ -107,6 +108,9 @@ impl Tree {
                     if ui.button("Settings").clicked() {
                         actions.push(TreeAction::OpenFolder(folder.path.clone()));
                     }
+                    if ui.button("Run folder…").clicked() {
+                        actions.push(TreeAction::Run(folder.path.clone()));
+                    }
                     ui.separator();
                     self.common_menu(ui, &folder.path, &folder.settings.name, actions);
                 });
@@ -144,6 +148,9 @@ impl Tree {
         label.context_menu(|ui| {
             if ui.button("Open").clicked() {
                 actions.push(TreeAction::OpenRequest(entry.path.clone()));
+            }
+            if ui.button("Run…").clicked() {
+                actions.push(TreeAction::Run(entry.path.clone()));
             }
             ui.separator();
             self.common_menu(ui, &entry.path, &entry.request.name, actions);

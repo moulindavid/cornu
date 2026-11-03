@@ -119,6 +119,13 @@ pub fn vertical_split(
     top: impl FnOnce(&mut egui::Ui),
     bottom: impl FnOnce(&mut egui::Ui),
 ) {
+    let [top_rect, bottom_rect] = split_rects(ui, id, fraction);
+    show_in(ui, top_rect, top);
+    show_in(ui, bottom_rect, bottom);
+}
+
+/// The two halves of a draggable split, for callers whose halves both need `&mut self`.
+pub fn split_rects(ui: &mut egui::Ui, id: egui::Id, fraction: &mut f32) -> [egui::Rect; 2] {
     const HANDLE: f32 = 8.0;
     let rect = ui.available_rect_before_wrap();
     let split_y = rect.top() + rect.height() * *fraction;
@@ -146,13 +153,11 @@ pub fn vertical_split(
         ui.visuals().widgets.noninteractive.bg_stroke
     };
     ui.painter().hline(rect.x_range(), split_y, stroke);
-
-    show_in(ui, top_rect, top);
-    show_in(ui, bottom_rect, bottom);
     ui.allocate_rect(rect, egui::Sense::hover());
+    [top_rect, bottom_rect]
 }
 
-fn show_in(ui: &mut egui::Ui, area: egui::Rect, contents: impl FnOnce(&mut egui::Ui)) {
+pub fn show_in(ui: &mut egui::Ui, area: egui::Rect, contents: impl FnOnce(&mut egui::Ui)) {
     ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
         ui.set_clip_rect(area.intersect(ui.clip_rect()));
         contents(ui);
