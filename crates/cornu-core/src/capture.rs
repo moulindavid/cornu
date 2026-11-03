@@ -93,20 +93,19 @@ impl Capture {
                 .map(str::to_owned)
                 .ok_or_else(|| CaptureError::MissingHeader(expression.to_owned())),
             CaptureSource::Body if expression.is_empty() => Ok(response.text().into_owned()),
-            CaptureSource::Body => {
-                let path = JsonPath::parse(expression)
-                    .map_err(|error| CaptureError::InvalidPath(error.to_string()))?;
-                let body: Value =
-                    serde_json::from_slice(&response.body).map_err(|_| CaptureError::NotJson)?;
-                match path.query(&body).all().as_slice() {
-                    [] => Err(CaptureError::NoMatch(expression.to_owned())),
-                    [value] => Ok(text(value)),
-                    values => {
-                        Ok(Value::Array(values.iter().map(|&v| v.clone()).collect()).to_string())
-                    }
-                }
-            }
+            CaptureSource::Body => query_body(expression, response),
         }
+    }
+}
+
+pub(crate) fn query_body(expression: &str, response: &Response) -> Result<String, CaptureError> {
+    let path = JsonPath::parse(expression)
+        .map_err(|error| CaptureError::InvalidPath(error.to_string()))?;
+    let body: Value = serde_json::from_slice(&response.body).map_err(|_| CaptureError::NotJson)?;
+    match path.query(&body).all().as_slice() {
+        [] => Err(CaptureError::NoMatch(expression.to_owned())),
+        [value] => Ok(text(value)),
+        values => Ok(Value::Array(values.iter().map(|&v| v.clone()).collect()).to_string()),
     }
 }
 

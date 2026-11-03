@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Auth, Body, Capture, KeyValue, Method, PartValue, Variables};
+use crate::{Assertion, Auth, Body, Capture, KeyValue, Method, PartValue, Variables};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request {
@@ -20,6 +20,8 @@ pub struct Request {
     pub body: Body,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub captures: Vec<Capture>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assertions: Vec<Assertion>,
 }
 
 impl Request {
@@ -58,6 +60,11 @@ impl Request {
 
     pub fn with_capture(mut self, capture: Capture) -> Self {
         self.captures.push(capture);
+        self
+    }
+
+    pub fn with_assertion(mut self, assertion: Assertion) -> Self {
+        self.assertions.push(assertion);
         self
     }
 
@@ -120,6 +127,9 @@ impl Request {
                 *query = sub(query);
                 *variables = sub(variables);
             }
+        }
+        for assertion in request.assertions.iter_mut().filter(|a| a.enabled) {
+            assertion.expected = sub(&assertion.expected);
         }
         Resolved {
             request,

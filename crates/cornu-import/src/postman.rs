@@ -165,6 +165,7 @@ impl Importer {
             headers,
             body,
             captures: Vec::new(),
+            assertions: Vec::new(),
         }
     }
 

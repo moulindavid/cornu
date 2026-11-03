@@ -1,3 +1,4 @@
+mod assertion;
 mod auth;
 mod body;
 mod capture;
@@ -11,6 +12,7 @@ mod response;
 pub mod runner;
 mod variables;
 
+pub use assertion::{AssertSource, Assertion, AssertionResult, Operator, check, passed};
 pub use auth::{ApiKeyLocation, Auth};
 pub use body::{Body, MultipartPart, PartValue};
 pub use capture::{Capture, CaptureError, CaptureSource, Captured, capture, store};

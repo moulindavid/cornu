@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use cornu_core::runner::{RunPlan, Step};
-use cornu_core::{Captured, Method, Request, capture, store};
+use cornu_core::{Assertion, AssertionResult, Captured, Method, Request, capture, check, store};
 use cornu_storage::{HistoryEntry, Outcome, moved_path};
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 use tokio::task::AbortHandle;
@@ -17,7 +17,7 @@ use crate::project::Project;
 use crate::response::ResponseView;
 use crate::runner::{RunTarget, RunnerAction, RunnerTab, StepInfo, folder_requests};
 use crate::tree::{Tree, TreeAction, method_color};
-use crate::widgets::{captured_lines, variable_field, vertical_split};
+use crate::widgets::{assertion_lines, captured_lines, variable_field, vertical_split};
 use crate::worker::{DocId, Worker};
 
 const SEND_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
@@ -33,6 +33,8 @@ enum SendState {
         /// The request as edited when it was sent, recorded in the history.
         sent: Box<Request>,
         timestamp: i64,
+        /// With their expected values resolved.
+        assertions: Vec<Assertion>,
     },
     Done(Box<ResponseView>),
     Failed(String),
@@ -46,6 +48,7 @@ struct RequestDoc {
     editor: EditorState,
     unresolved: Vec<String>,
     captured: Vec<Captured>,
+    assertions: Vec<AssertionResult>,
 }
 
 impl RequestDoc {
@@ -57,6 +60,7 @@ impl RequestDoc {
             editor: EditorState::default(),
             unresolved: Vec::new(),
             captured: Vec::new(),
+            assertions: Vec::new(),
         }
     }
 
@@ -525,7 +529,10 @@ impl CornuApp {
             };
             // A late result for a cancelled request is dropped.
             let SendState::Sending {
-                sent, timestamp, ..
+                sent,
+                timestamp,
+                assertions,
+                ..
             } = &doc.state
             else {
                 continue;
@@ -548,6 +555,7 @@ impl CornuApp {
             };
             if let Ok(response) = &done.result {
                 doc.captured = capture(&sent.captures, response);
+                doc.assertions = check(assertions, response);
                 store(&mut self.project.captured, &doc.captured);
             }
             doc.state = match done.result {
@@ -925,12 +933,15 @@ impl CornuApp {
             let resolved = request.resolve(&variables);
             doc.unresolved = resolved.unresolved;
             doc.captured.clear();
+            doc.assertions.clear();
+            let assertions = resolved.request.assertions.clone();
             let abort = self.worker.send(&ctx, id, resolved.request);
             doc.state = SendState::Sending {
                 abort,
                 started: Instant::now(),
                 sent: Box::new(doc.request.clone()),
                 timestamp: format::unix_now(),
+                assertions,
             };
         }
 
@@ -951,6 +962,7 @@ impl CornuApp {
                     );
                 }
                 captured_lines(ui, &doc.captured);
+                assertion_lines(ui, &doc.assertions);
                 response_view(ui, &mut doc.state);
             },
         );
@@ -1565,7 +1577,13 @@ mod tests {
         let mut app = CornuApp::new(Worker::new().unwrap(), None);
         let request = Request::new(Method::Post, format!("{}/login", server.uri()))
             .with_capture(Capture::body("token", "$.access_token"))
-            .with_capture(Capture::header("session", "X-Session"));
+            .with_capture(Capture::header("session", "X-Session"))
+            .with_assertion(Assertion::status(200))
+            .with_assertion(Assertion::body(
+                "$.access_token",
+                cornu_core::Operator::Equals,
+                "stale",
+            ));
         app.open_draft(request.clone());
         let id = app.active.unwrap();
         let ctx = egui::Context::default();
@@ -1577,6 +1595,7 @@ mod tests {
         doc.state = SendState::Sending {
             abort,
             started: Instant::now(),
+            assertions: request.assertions.clone(),
             sent: Box::new(request),
             timestamp: 0,
         };
@@ -1597,5 +1616,7 @@ mod tests {
         let shapes = format!("{:?}", output.shapes);
         assert!(shapes.contains("Captured token = fresh"), "{shapes}");
         assert!(shapes.contains("Could not capture session"), "{shapes}");
+        assert!(shapes.contains("Tests: 1/2 passed"), "{shapes}");
+        assert!(shapes.contains("got fresh"), "{shapes}");
     }
 }

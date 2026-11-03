@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use cornu_core::{
-    ApiKeyLocation, Auth, Body, Capture, CaptureSource, KeyValue, Method, MultipartPart, PartValue,
-    Request,
+    ApiKeyLocation, AssertSource, Assertion, Auth, Body, Capture, CaptureSource, KeyValue, Method,
+    MultipartPart, Operator, PartValue, Request,
 };
 use eframe::egui;
 
@@ -27,6 +27,7 @@ enum Tab {
     Body,
     Auth,
     Captures,
+    Tests,
 }
 
 #[derive(Debug, Default)]
@@ -63,6 +64,11 @@ pub fn request_editor(
             count => format!("Captures ({count})"),
         };
         ui.selectable_value(&mut state.tab, Tab::Captures, captures);
+        let tests = match request.assertions.iter().filter(|a| a.enabled).count() {
+            0 => "Tests".to_owned(),
+            count => format!("Tests ({count})"),
+        };
+        ui.selectable_value(&mut state.tab, Tab::Tests, tests);
     });
     ui.separator();
 
@@ -84,7 +90,79 @@ pub fn request_editor(
             }
             Tab::Auth => auth_editor(ui, &mut request.auth),
             Tab::Captures => capture_table(ui, id.with("captures"), &mut request.captures),
+            Tab::Tests => assertion_table(ui, id.with("tests"), &mut request.assertions),
         });
+}
+
+fn assertion_table(ui: &mut egui::Ui, id: egui::Id, assertions: &mut Vec<Assertion>) {
+    ui.weak("Checked on every response. With tests, a request passes when they all do, whatever its status.");
+    ui.add_space(4.0);
+    let width = ((ui.available_width() - 330.0) / 2.0).max(120.0);
+    let mut remove = None;
+    egui::Grid::new(id)
+        .num_columns(6)
+        .striped(true)
+        .spacing([6.0, 4.0])
+        .show(ui, |ui| {
+            for (index, assertion) in assertions.iter_mut().enumerate() {
+                ui.checkbox(&mut assertion.enabled, "");
+                egui::ComboBox::from_id_salt(id.with(("source", index)))
+                    .selected_text(assertion.source.label())
+                    .width(100.0)
+                    .show_ui(ui, |ui| {
+                        for source in AssertSource::ALL {
+                            ui.selectable_value(&mut assertion.source, source, source.label());
+                        }
+                    });
+                let hint = match assertion.source {
+                    AssertSource::Body => "$.data.id (empty: whole body)",
+                    AssertSource::Header => "Header name",
+                    _ => "",
+                };
+                ui.add_enabled(
+                    assertion.source.takes_expression(),
+                    egui::TextEdit::singleline(&mut assertion.expression)
+                        .id(id.with(("expression", index)))
+                        .hint_text(hint)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(width),
+                );
+                egui::ComboBox::from_id_salt(id.with(("operator", index)))
+                    .selected_text(assertion.operator.label())
+                    .width(100.0)
+                    .show_ui(ui, |ui| {
+                        for operator in Operator::ALL {
+                            ui.selectable_value(
+                                &mut assertion.operator,
+                                operator,
+                                operator.label(),
+                            );
+                        }
+                    });
+                ui.add_enabled(
+                    assertion.operator.takes_value(),
+                    egui::TextEdit::singleline(&mut assertion.expected)
+                        .id(id.with(("expected", index)))
+                        .hint_text("expected")
+                        .desired_width(width),
+                );
+                if ui.small_button("🗑").on_hover_text("Remove").clicked() {
+                    remove = Some(index);
+                }
+                ui.end_row();
+            }
+        });
+    if let Some(index) = remove {
+        assertions.remove(index);
+    }
+    if ui.button("➕ Add test").clicked() {
+        let assertion = if assertions.is_empty() {
+            Assertion::status(200)
+        } else {
+            Assertion::body("", Operator::Equals, "")
+        };
+        assertions.push(assertion);
+    }
 }
 
 fn capture_table(ui: &mut egui::Ui, id: egui::Id, captures: &mut Vec<Capture>) {
@@ -692,6 +770,33 @@ mod tests {
         output.textures_delta.clear();
         let text = format!("{:?}", output.shapes);
         for expected in ["Captures (2)", "$.access_token", "Header", "Add capture"] {
+            assert!(text.contains(expected), "{expected} in {text}");
+        }
+    }
+
+    #[test]
+    fn tests_tab_lists_each_assertion() {
+        let mut request = Request::new(Method::Get, "https://x.example/users/1")
+            .with_assertion(Assertion::status(200))
+            .with_assertion(Assertion::body("$.name", Operator::Contains, "Ada"));
+        let mut state = EditorState {
+            tab: Tab::Tests,
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            request_editor(ui, egui::Id::unique("editor"), &mut request, &mut state);
+        });
+        output.textures_delta.clear();
+        let text = format!("{:?}", output.shapes);
+        for expected in ["Tests (2)", "$.name", "contains", "Ada", "Add test"] {
             assert!(text.contains(expected), "{expected} in {text}");
         }
     }
