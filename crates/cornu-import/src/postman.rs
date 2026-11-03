@@ -164,6 +164,7 @@ impl Importer {
             auth: self.auth(request.get("auth"), &location),
             headers,
             body,
+            captures: Vec::new(),
         }
     }
 

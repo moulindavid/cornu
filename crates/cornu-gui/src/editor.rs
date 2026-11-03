@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
-use cornu_core::{ApiKeyLocation, Auth, Body, KeyValue, Method, MultipartPart, PartValue, Request};
+use cornu_core::{
+    ApiKeyLocation, Auth, Body, Capture, CaptureSource, KeyValue, Method, MultipartPart, PartValue,
+    Request,
+};
 use eframe::egui;
 
 use crate::query_editor::{CompletionPopup, query_editor};
@@ -23,6 +26,7 @@ enum Tab {
     Headers,
     Body,
     Auth,
+    Captures,
 }
 
 #[derive(Debug, Default)]
@@ -54,6 +58,11 @@ pub fn request_editor(
         ui.selectable_value(&mut state.tab, Tab::Headers, headers);
         ui.selectable_value(&mut state.tab, Tab::Body, body);
         ui.selectable_value(&mut state.tab, Tab::Auth, auth);
+        let captures = match request.captures.iter().filter(|c| c.enabled).count() {
+            0 => "Captures".to_owned(),
+            count => format!("Captures ({count})"),
+        };
+        ui.selectable_value(&mut state.tab, Tab::Captures, captures);
     });
     ui.separator();
 
@@ -74,7 +83,61 @@ pub fn request_editor(
                 }
             }
             Tab::Auth => auth_editor(ui, &mut request.auth),
+            Tab::Captures => capture_table(ui, id.with("captures"), &mut request.captures),
         });
+}
+
+fn capture_table(ui: &mut egui::Ui, id: egui::Id, captures: &mut Vec<Capture>) {
+    ui.weak("Store values of the response into variables, for the requests sent after this one.");
+    ui.add_space(4.0);
+    let (name_width, expression_width) = column_widths(ui.available_width() - 90.0);
+    let mut remove = None;
+    egui::Grid::new(id)
+        .num_columns(5)
+        .striped(true)
+        .spacing([6.0, 4.0])
+        .show(ui, |ui| {
+            for (index, capture) in captures.iter_mut().enumerate() {
+                ui.checkbox(&mut capture.enabled, "");
+                ui.add(
+                    egui::TextEdit::singleline(&mut capture.variable)
+                        .id(id.with(("variable", index)))
+                        .hint_text("variable")
+                        .desired_width(name_width),
+                );
+                egui::ComboBox::from_id_salt(id.with(("source", index)))
+                    .selected_text(capture.source.label())
+                    .width(80.0)
+                    .show_ui(ui, |ui| {
+                        for source in CaptureSource::ALL {
+                            ui.selectable_value(&mut capture.source, source, source.label());
+                        }
+                    });
+                let hint = match capture.source {
+                    CaptureSource::Body => "$.data.token (empty: whole body)",
+                    CaptureSource::Header => "Header name",
+                    CaptureSource::Status => "",
+                };
+                ui.add_enabled(
+                    capture.source != CaptureSource::Status,
+                    egui::TextEdit::singleline(&mut capture.expression)
+                        .id(id.with(("expression", index)))
+                        .hint_text(hint)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(expression_width),
+                );
+                if ui.small_button("🗑").on_hover_text("Remove").clicked() {
+                    remove = Some(index);
+                }
+                ui.end_row();
+            }
+        });
+    if let Some(index) = remove {
+        captures.remove(index);
+    }
+    if ui.button("➕ Add capture").clicked() {
+        captures.push(Capture::body("", ""));
+    }
 }
 
 /// Moves `?a=1&b=2` from the URL into the query table, decoding percent escapes.
@@ -604,5 +667,32 @@ mod tests {
         let mut invalid = r#"{"a": {{value}}}"#.to_owned();
         assert!(format_json(&mut invalid).is_err());
         assert_eq!(invalid, r#"{"a": {{value}}}"#);
+    }
+
+    #[test]
+    fn captures_tab_lists_each_capture() {
+        let mut request = Request::new(Method::Post, "https://x.example/login")
+            .with_capture(Capture::body("token", "$.access_token"))
+            .with_capture(Capture::header("location", "Location"));
+        let mut state = EditorState {
+            tab: Tab::Captures,
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            request_editor(ui, egui::Id::unique("editor"), &mut request, &mut state);
+        });
+        output.textures_delta.clear();
+        let text = format!("{:?}", output.shapes);
+        for expected in ["Captures (2)", "$.access_token", "Header", "Add capture"] {
+            assert!(text.contains(expected), "{expected} in {text}");
+        }
     }
 }

@@ -7,6 +7,8 @@ use cornu_storage::{EnvironmentEntry, Folder, History, Settings, StorageError, W
 pub struct Project {
     pub workspace: Workspace,
     pub history: History,
+    /// Values captured from responses this session; they win over every saved variable.
+    pub captured: Vec<(String, String)>,
     on_disk: bool,
 }
 
@@ -27,6 +29,7 @@ impl Project {
                 problems: Vec::new(),
             },
             history: History::default(),
+            captured: Vec::new(),
             on_disk: false,
         }
     }
@@ -51,6 +54,7 @@ impl Project {
         Self {
             workspace,
             history,
+            captured: Vec::new(),
             on_disk: true,
         }
     }
@@ -78,6 +82,7 @@ impl Project {
         let path = path.unwrap_or(Path::new(""));
         self.workspace
             .variables(path, self.environment(environment))
+            .with_layer(self.captured.iter().cloned())
     }
 
     pub fn effective_auth(&self, path: Option<&Path>, auth: &Auth) -> Auth {

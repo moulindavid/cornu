@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Auth, Body, KeyValue, Method, PartValue, Variables};
+use crate::{Auth, Body, Capture, KeyValue, Method, PartValue, Variables};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request {
@@ -18,6 +18,8 @@ pub struct Request {
     pub auth: Auth,
     #[serde(default, skip_serializing_if = "Body::is_none")]
     pub body: Body,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub captures: Vec<Capture>,
 }
 
 impl Request {
@@ -51,6 +53,11 @@ impl Request {
 
     pub fn with_body(mut self, body: Body) -> Self {
         self.body = body;
+        self
+    }
+
+    pub fn with_capture(mut self, capture: Capture) -> Self {
+        self.captures.push(capture);
         self
     }
 
@@ -149,7 +156,9 @@ mod tests {
             .with_header("X-Trace", "1")
             .with_body(Body::Json {
                 text: r#"{"name": "{{name}}"}"#.into(),
-            });
+            })
+            .with_capture(Capture::body("user_id", "$.id"))
+            .with_capture(Capture::header("location", "Location"));
         let text = toml::to_string(&request).unwrap();
         assert_eq!(toml::from_str::<Request>(&text).unwrap(), request);
     }

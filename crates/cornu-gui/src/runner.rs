@@ -3,14 +3,14 @@ use std::path::PathBuf;
 
 use cornu_core::runner::data::{CsvData, DataError, ValueList, guess_header, rows_from_lists};
 use cornu_core::runner::{Row, RunOptions, RunSummary};
-use cornu_core::{Method, Response};
+use cornu_core::{Captured, Method, Response};
 use cornu_storage::{Folder, Item, RequestEntry};
 use eframe::egui;
 
 use crate::format;
 use crate::response::{ResponseView, status_color};
 use crate::tree::method_color;
-use crate::widgets::{show_in, split_rects};
+use crate::widgets::{captured_lines, show_in, split_rects};
 use crate::worker::{DocId, RunEvent, RunHandle};
 
 const PREVIEW_ROWS: usize = 8;
@@ -97,6 +97,7 @@ pub struct RunRow {
     pub url: String,
     pub unresolved: Vec<String>,
     pub outcome: Result<Response, String>,
+    pub captured: Vec<Captured>,
 }
 
 struct Running {
@@ -205,6 +206,7 @@ impl RunnerTab {
                         url: result.request.url.clone(),
                         unresolved: result.unresolved,
                         outcome: result.outcome.map_err(|error| error.to_string()),
+                        captured: result.captured,
                     };
                     let key = (row.iteration, row.step);
                     let index = self
@@ -617,6 +619,7 @@ impl RunnerTab {
                 ),
             );
         }
+        captured_lines(ui, &row.captured);
         match (&row.outcome, &mut self.view) {
             (Err(error), _) => {
                 ui.colored_label(ui.visuals().error_fg_color, error);
@@ -765,6 +768,16 @@ fn export_json(rows: &[&RunRow]) -> String {
                 .as_ref()
                 .ok()
                 .map(|response| response.text().into_owned());
+            let captured: Vec<serde_json::Value> = row
+                .captured
+                .iter()
+                .map(|captured| match &captured.value {
+                    Ok(value) => serde_json::json!({"variable": captured.variable, "value": value}),
+                    Err(error) => {
+                        serde_json::json!({"variable": captured.variable, "error": error.to_string()})
+                    }
+                })
+                .collect();
             serde_json::json!({
                 "iteration": row.iteration + 1,
                 "request": row.name,
@@ -775,6 +788,7 @@ fn export_json(rows: &[&RunRow]) -> String {
                 "time_ms": time,
                 "size": size,
                 "unresolved": row.unresolved,
+                "captured": captured,
                 "body": body,
             })
         })
@@ -799,7 +813,7 @@ mod tests {
     use std::time::Duration;
 
     use cornu_core::runner::{CancelToken, StepResult};
-    use cornu_core::{Request, SendError};
+    use cornu_core::{CaptureError, Request, SendError};
     use cornu_storage::Settings;
 
     use super::*;
@@ -819,6 +833,20 @@ mod tests {
             step,
             request: Request::new(Method::Get, format!("https://x.example/{iteration}/{step}")),
             unresolved: Vec::new(),
+            captured: if (iteration, step) == (0, 0) {
+                vec![
+                    Captured {
+                        variable: "token".into(),
+                        value: Ok("abc".into()),
+                    },
+                    Captured {
+                        variable: "id".into(),
+                        value: Err(CaptureError::NotJson),
+                    },
+                ]
+            } else {
+                Vec::new()
+            },
             outcome,
         }))
     }
@@ -902,6 +930,10 @@ mod tests {
     #[test]
     fn selecting_a_row_shows_its_response() {
         let mut tab = finished_tab();
+        tab.select(0);
+        let shapes = render(&mut tab, &[]);
+        assert!(shapes.contains("Captured token = abc"), "{shapes}");
+        assert!(shapes.contains("Could not capture id"), "{shapes}");
         tab.select(2);
         let shapes = render(&mut tab, &[]);
         assert!(shapes.contains("missing"), "{shapes}");
@@ -931,6 +963,9 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&export_json(&rows)).unwrap();
         assert_eq!(json[0]["status"], 200);
         assert_eq!(json[0]["body"], "{\"id\":1}");
+        assert_eq!(json[0]["captured"][0]["value"], "abc");
+        assert_eq!(json[0]["captured"][1]["error"], "the body is not JSON");
+        assert_eq!(json[1]["captured"], serde_json::json!([]));
         assert_eq!(json[1]["error"], "request timed out");
         assert_eq!(json[1]["status"], serde_json::Value::Null);
         assert_eq!(json[2]["iteration"], 2);

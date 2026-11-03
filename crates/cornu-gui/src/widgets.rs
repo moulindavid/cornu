@@ -1,4 +1,4 @@
-use cornu_core::{KeyValue, Segment, Variables, is_dynamic, segments};
+use cornu_core::{Captured, KeyValue, Segment, Variables, is_dynamic, segments};
 use eframe::egui;
 
 pub fn key_value_table(ui: &mut egui::Ui, id: egui::Id, rows: &mut Vec<KeyValue>) {
@@ -242,5 +242,22 @@ fn variable_colors(visuals: &egui::Visuals) -> (egui::Color32, egui::Color32) {
             egui::Color32::from_rgb(0x1e, 0x66, 0xf5),
             egui::Color32::from_rgb(0xd2, 0x0f, 0x39),
         )
+    }
+}
+
+pub fn captured_lines(ui: &mut egui::Ui, captured: &[Captured]) {
+    for Captured { variable, value } in captured {
+        match value {
+            Ok(value) => {
+                let value = crate::format::truncate(value, 80);
+                ui.label(format!("✔ Captured {variable} = {value}"));
+            }
+            Err(error) => {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!("⚠ Could not capture {variable}: {error}"),
+                );
+            }
+        }
     }
 }

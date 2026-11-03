@@ -40,6 +40,15 @@ pub fn unix_now() -> i64 {
         .map_or(0, |elapsed| elapsed.as_secs() as i64)
 }
 
+/// On one line, cut after `max` characters.
+pub fn truncate(text: &str, max: usize) -> String {
+    let line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match line.char_indices().nth(max) {
+        Some((end, _)) => format!("{}…", &line[..end]),
+        None => line,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,5 +75,12 @@ mod tests {
         assert_eq!(ago(7200), "2 h ago");
         assert_eq!(ago(90_000), "yesterday");
         assert_eq!(ago(3 * 86_400), "3 days ago");
+    }
+
+    #[test]
+    fn truncate_keeps_one_line() {
+        assert_eq!(truncate("short", 10), "short");
+        assert_eq!(truncate("a\n  b", 10), "a b");
+        assert_eq!(truncate("éééé", 2), "éé…");
     }
 }
