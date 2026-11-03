@@ -1,5 +1,6 @@
 use std::sync::mpsc::{Receiver, Sender, channel};
 
+use cornu_core::runner::{CancelToken, RunPlan, RunSummary, StepResult};
 use cornu_core::{ClientOptions, HttpClient, Request, Response, SendError};
 use eframe::egui;
 use tokio::runtime::Runtime;
@@ -10,6 +11,17 @@ pub type DocId = u64;
 pub struct Completed {
     pub doc: DocId,
     pub result: Result<Response, SendError>,
+}
+
+pub enum RunEvent {
+    Result(Box<StepResult>),
+    /// Always the last event, after every result.
+    Finished(RunSummary),
+}
+
+pub struct RunHandle {
+    pub events: Receiver<RunEvent>,
+    pub cancel: CancelToken,
 }
 
 pub struct Worker {
@@ -63,6 +75,31 @@ impl Worker {
             ctx.request_repaint();
         });
         rx
+    }
+
+    pub fn start_run(&self, ctx: &egui::Context, plan: RunPlan) -> RunHandle {
+        let (results_tx, mut results_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (events_tx, events) = channel();
+        let cancel = CancelToken::default();
+        let client = self.client.clone();
+        let token = cancel.clone();
+        let run = self
+            .runtime
+            .spawn(async move { cornu_core::runner::run(&client, plan, &token, results_tx).await });
+        let ctx = ctx.clone();
+        self.runtime.spawn(async move {
+            while let Some(result) = results_rx.recv().await {
+                if events_tx.send(RunEvent::Result(Box::new(result))).is_err() {
+                    return;
+                }
+                ctx.request_repaint();
+            }
+            if let Ok(summary) = run.await {
+                let _ = events_tx.send(RunEvent::Finished(summary));
+            }
+            ctx.request_repaint();
+        });
+        RunHandle { events, cancel }
     }
 
     pub fn completed(&self) -> impl Iterator<Item = Completed> + '_ {

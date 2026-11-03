@@ -9,6 +9,7 @@ mod import;
 mod project;
 mod query_editor;
 mod response;
+mod runner;
 mod schema;
 mod tree;
 mod widgets;

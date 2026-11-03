@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use cornu_core::runner::{RunPlan, Step};
 use cornu_core::{Method, Request};
 use cornu_storage::{HistoryEntry, Outcome, moved_path};
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
@@ -14,6 +15,7 @@ use crate::history::{HistoryAction, HistoryPanel};
 use crate::import::SpecImport;
 use crate::project::Project;
 use crate::response::ResponseView;
+use crate::runner::{RunTarget, RunnerAction, RunnerTab, StepInfo, folder_requests};
 use crate::tree::{Tree, TreeAction, method_color};
 use crate::widgets::{variable_field, vertical_split};
 use crate::worker::{DocId, Worker};
@@ -74,6 +76,7 @@ impl RequestDoc {
 enum Content {
     Request(Box<RequestDoc>),
     Folder(FolderTab),
+    Runner(Box<RunnerTab>),
 }
 
 struct Document {
@@ -87,7 +90,7 @@ impl Document {
     fn request(&self) -> Option<&RequestDoc> {
         match &self.content {
             Content::Request(doc) => Some(doc),
-            Content::Folder(_) => None,
+            Content::Folder(_) | Content::Runner(_) => None,
         }
     }
 
@@ -96,7 +99,7 @@ impl Document {
     }
 
     fn is_draft(&self) -> bool {
-        self.path.is_none()
+        self.path.is_none() && matches!(self.content, Content::Request(_))
     }
 }
 
@@ -175,18 +178,15 @@ impl CornuApp {
         self.active = Some(id);
     }
 
-    fn find_by_path(&self, path: &Path, folder: bool) -> Option<DocId> {
+    fn find_by_path(&self, path: &Path, kind: impl Fn(&Content) -> bool) -> Option<DocId> {
         self.documents
             .iter()
-            .find(|doc| {
-                doc.path.as_deref() == Some(path)
-                    && matches!(doc.content, Content::Folder(_)) == folder
-            })
+            .find(|doc| doc.path.as_deref() == Some(path) && kind(&doc.content))
             .map(|doc| doc.id)
     }
 
     fn open_request(&mut self, path: &Path) {
-        if let Some(id) = self.find_by_path(path, false) {
+        if let Some(id) = self.find_by_path(path, |c| matches!(c, Content::Request(_))) {
             return self.open(id);
         }
         if let Some(entry) = self.project.workspace.find_request(path) {
@@ -196,10 +196,22 @@ impl CornuApp {
     }
 
     fn open_folder(&mut self, path: &Path) {
-        match self.find_by_path(path, true) {
+        match self.find_by_path(path, |c| matches!(c, Content::Folder(_))) {
             Some(id) => self.open(id),
             None => {
                 self.add_document(Some(path.to_owned()), Content::Folder(FolderTab::default()));
+            }
+        }
+    }
+
+    fn open_runner(&mut self, path: Option<PathBuf>, target: RunTarget) {
+        let existing = self.documents.iter().find(|doc| {
+            doc.path == path && matches!(&doc.content, Content::Runner(tab) if tab.target == target)
+        });
+        match existing {
+            Some(doc) => self.open(doc.id),
+            None => {
+                self.add_document(path, Content::Runner(Box::new(RunnerTab::new(target))));
             }
         }
     }
@@ -472,6 +484,14 @@ impl CornuApp {
                 }
             }
             TreeAction::Delete(path) => self.deleting = Some(path),
+            TreeAction::Run(path) => {
+                let target = if workspace.find_request(&path).is_some() {
+                    RunTarget::Request
+                } else {
+                    RunTarget::Folder
+                };
+                self.open_runner(Some(path), target);
+            }
         }
         Ok(())
     }
@@ -613,6 +633,13 @@ impl CornuApp {
                     {
                         actions.push(TreeAction::OpenFolder(PathBuf::new()));
                     }
+                    if ui
+                        .button("▶")
+                        .on_hover_text("Run every request of the workspace")
+                        .clicked()
+                    {
+                        actions.push(TreeAction::Run(PathBuf::new()));
+                    }
                 });
                 ui.add_space(4.0);
                 let tree = &self.project.workspace.tree;
@@ -717,6 +744,7 @@ impl CornuApp {
         match &doc.content {
             Content::Request(request) if request.is_modified() => format!("● {}", request.title()),
             Content::Request(request) => request.title().to_owned(),
+            Content::Runner(_) => format!("▶ {}", self.runner_name(doc)),
             Content::Folder(_) => {
                 let path = doc.path.as_deref().unwrap_or(Path::new(""));
                 let name = self
@@ -773,6 +801,7 @@ impl CornuApp {
                 }
             }
             Content::Request(_) => self.request_view(ui, id),
+            Content::Runner(_) => self.runner_view(ui, id),
         }
     }
 
@@ -817,6 +846,7 @@ impl CornuApp {
         let mut cancel = false;
         let mut save = false;
         let mut copy_curl = false;
+        let mut run = false;
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt(("method", id))
                 .selected_text(doc.request.method.as_str())
@@ -840,6 +870,9 @@ impl CornuApp {
                 ui.menu_button("⋯", |ui| {
                     if ui.button("Copy as cURL").clicked() {
                         copy_curl = true;
+                    }
+                    if ui.button("Run with data…").clicked() {
+                        run = true;
                     }
                 });
                 if ui.button(button).clicked() {
@@ -925,6 +958,142 @@ impl CornuApp {
         if save {
             self.save(id);
         }
+        if run {
+            self.open_runner(None, RunTarget::Tab(id));
+        }
+    }
+
+    fn runner_name(&self, doc: &Document) -> String {
+        let Content::Runner(tab) = &doc.content else {
+            return String::new();
+        };
+        let path = doc.path.as_deref().unwrap_or(Path::new(""));
+        let workspace = &self.project.workspace;
+        match tab.target {
+            RunTarget::Folder => workspace
+                .folder(path)
+                .map_or("Folder".into(), |folder| folder.settings.name.clone()),
+            RunTarget::Request => workspace
+                .find_request(path)
+                .map_or("Request".into(), |entry| entry.request.name.clone()),
+            RunTarget::Tab(id) => self
+                .documents
+                .iter()
+                .find(|doc| doc.id == id)
+                .and_then(Document::request)
+                .map_or("Closed request".into(), |request| {
+                    request.title().to_owned()
+                }),
+        }
+    }
+
+    /// The requests a runner would send now, with the path their variables and auth come from.
+    fn runner_requests(&self, doc: &Document) -> Vec<(Option<PathBuf>, Request)> {
+        let Content::Runner(tab) = &doc.content else {
+            return Vec::new();
+        };
+        let path = doc.path.as_deref().unwrap_or(Path::new(""));
+        let workspace = &self.project.workspace;
+        match tab.target {
+            RunTarget::Folder => workspace
+                .folder(path)
+                .map(folder_requests)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|entry| (Some(entry.path.clone()), entry.request.clone()))
+                .collect(),
+            RunTarget::Request => workspace
+                .find_request(path)
+                .map(|entry| (Some(entry.path.clone()), entry.request.clone()))
+                .into_iter()
+                .collect(),
+            RunTarget::Tab(id) => self
+                .documents
+                .iter()
+                .find(|doc| doc.id == id)
+                .and_then(|doc| Some((doc.path.clone(), doc.request()?.request.clone())))
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    fn runner_view(&mut self, ui: &mut egui::Ui, id: DocId) {
+        let Some(doc) = self.documents.iter().find(|doc| doc.id == id) else {
+            return;
+        };
+        let requests = self.runner_requests(doc);
+        let steps: Vec<StepInfo> = requests
+            .iter()
+            .map(|(path, request)| StepInfo {
+                path: path.clone(),
+                name: if request.name.is_empty() {
+                    "Untitled request".to_owned()
+                } else {
+                    request.name.clone()
+                },
+                method: request.method.clone(),
+            })
+            .collect();
+        let active = self.environments.active;
+        let environment = self.project.environment(active).map(|env| env.name.clone());
+        let Some(Content::Runner(tab)) = self
+            .documents
+            .iter_mut()
+            .find(|doc| doc.id == id)
+            .map(|doc| &mut doc.content)
+        else {
+            return;
+        };
+        tab.poll();
+        let action = tab.show(
+            ui,
+            egui::Id::unique(("runner", id)),
+            &steps,
+            environment.as_deref(),
+        );
+        if let Some(RunnerAction::Start) = action {
+            self.start_runner(ui.ctx(), id);
+        }
+    }
+
+    fn start_runner(&mut self, ctx: &egui::Context, id: DocId) {
+        let Some(doc) = self.documents.iter().find(|doc| doc.id == id) else {
+            return;
+        };
+        let requests = self.runner_requests(doc);
+        let active = self.environments.active;
+        let Some(Content::Runner(tab)) = self
+            .documents
+            .iter_mut()
+            .find(|doc| doc.id == id)
+            .map(|doc| &mut doc.content)
+        else {
+            return;
+        };
+        let Ok(rows) = tab.data_rows() else {
+            return;
+        };
+        let (names, steps): (Vec<String>, Vec<Step>) = requests
+            .into_iter()
+            .filter(|(path, _)| !path.as_ref().is_some_and(|p| tab.excluded.contains(p)))
+            .map(|(path, mut request)| {
+                request.auth = self.project.effective_auth(path.as_deref(), &request.auth);
+                let variables = self.project.variables(path.as_deref(), active);
+                let name = if request.name.is_empty() {
+                    "Untitled request".to_owned()
+                } else {
+                    request.name.clone()
+                };
+                (name, Step { request, variables })
+            })
+            .unzip();
+        let plan = RunPlan {
+            steps,
+            rows,
+            options: tab.options(),
+        };
+        let total = plan.total();
+        tab.begin(self.worker.start_run(ctx, plan), names, total);
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
@@ -1244,5 +1413,91 @@ mod tests {
         assert_eq!(take_curl_paste(&mut events), Some(command));
         assert_eq!(events.len(), 2);
         assert_eq!(take_curl_paste(&mut events), None);
+    }
+
+    #[test]
+    fn folder_runs_send_every_request_with_list_values_and_folder_auth() {
+        use wiremock::matchers::{header, method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let server = runtime.block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path_regex("^/users/(7|8)$"))
+                .and(header("authorization", "Bearer folder-token"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&server)
+                .await;
+            Mock::given(method("DELETE"))
+                .and(header("authorization", "Bearer folder-token"))
+                .respond_with(ResponseTemplate::new(204))
+                .mount(&server)
+                .await;
+            server
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut workspace = cornu_storage::Workspace::init(dir.path(), "Demo").unwrap();
+        let folder = workspace.create_folder(Path::new(""), "Users").unwrap();
+        let mut settings = workspace.folder(&folder).unwrap().settings.clone();
+        settings.auth = cornu_core::Auth::Bearer {
+            token: "{{token}}".into(),
+        };
+        settings.variables = vec![
+            cornu_core::KeyValue::new("token", "folder-token"),
+            cornu_core::KeyValue::new("base", server.uri()),
+        ];
+        workspace.update_folder(&folder, settings).unwrap();
+        for (method, name) in [(Method::Get, "Get user"), (Method::Delete, "Delete user")] {
+            let request = Request::new(method, "{{base}}/users/{{id}}").with_name(name);
+            workspace.create_request(&folder, request).unwrap();
+        }
+
+        let mut app = CornuApp::new(Worker::new().unwrap(), Some(dir.path().to_owned()));
+        app.apply(&egui::Context::default(), TreeAction::Run(folder.clone()));
+        let id = app.active.unwrap();
+        fn runner(app: &mut CornuApp, id: DocId) -> &mut RunnerTab {
+            let doc = app.documents.iter_mut().find(|doc| doc.id == id).unwrap();
+            match &mut doc.content {
+                Content::Runner(tab) => tab,
+                _ => panic!("not a runner"),
+            }
+        }
+        let list = cornu_core::runner::data::ValueList::new("id", "7\n8");
+        runner(&mut app, id).use_lists(vec![list]);
+        app.start_runner(&egui::Context::default(), id);
+
+        let started = std::time::Instant::now();
+        let runner = runner(&mut app, id);
+        while runner.is_running() && started.elapsed() < std::time::Duration::from_secs(5) {
+            runner.poll();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let rows: Vec<_> = runner
+            .rows()
+            .iter()
+            .map(|row| {
+                let status = row.outcome.as_ref().map(|r| r.status).unwrap_or(0);
+                (
+                    row.name.as_str(),
+                    row.url.trim_start_matches(&server.uri()),
+                    status,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Get user", "/users/7", 200),
+                ("Delete user", "/users/7", 204),
+                ("Get user", "/users/8", 200),
+                ("Delete user", "/users/8", 204),
+            ]
+        );
+        assert_eq!(
+            app.tab_title(app.documents.iter().find(|d| d.id == id).unwrap()),
+            "▶ Users"
+        );
     }
 }
