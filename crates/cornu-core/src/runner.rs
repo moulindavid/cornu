@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
 
-use crate::{HttpClient, Request, Response, SendError, Variables};
+use crate::{Captured, HttpClient, Request, Response, SendError, Variables, capture, store};
 
 /// The variables one iteration adds on top of each step's own, as `(name, value)`.
 pub type Row = Vec<(String, String)>;
@@ -64,6 +64,7 @@ pub struct StepResult {
     pub request: Request,
     pub unresolved: Vec<String>,
     pub outcome: Result<Response, SendError>,
+    pub captured: Vec<Captured>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,16 +135,27 @@ pub async fn run(
             let Ok(_permit) = permits.acquire().await else {
                 return;
             };
+            // Captures feed the next steps of this iteration only, over the row values.
+            let mut captures = Vec::new();
             for (index, step) in steps.iter().enumerate() {
                 if cancel.is_cancelled() {
                     return;
                 }
-                let variables = step.variables.clone().with_layer(row.iter().cloned());
+                let variables = step
+                    .variables
+                    .clone()
+                    .with_layer(row.iter().cloned())
+                    .with_layer(captures.iter().cloned());
                 let resolved = step.request.resolve(&variables);
                 let outcome = tokio::select! {
                     outcome = client.send(&resolved.request) => outcome,
                     _ = cancel.cancelled() => Err(SendError::Cancelled),
                 };
+                let captured = match &outcome {
+                    Ok(response) => capture(&step.request.captures, response),
+                    Err(_) => Vec::new(),
+                };
+                store(&mut captures, &captured);
                 let _ = counts.send(match &outcome {
                     Ok(response) if response.is_success() => Count::Succeeded,
                     Ok(_) => Count::Failed,
@@ -155,6 +167,7 @@ pub async fn run(
                     request: resolved.request,
                     unresolved: resolved.unresolved,
                     outcome,
+                    captured,
                 });
                 let last = last_iteration && index + 1 == steps.len();
                 if !options.delay.is_zero() && !last {

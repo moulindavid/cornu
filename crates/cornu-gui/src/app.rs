@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use cornu_core::runner::{RunPlan, Step};
-use cornu_core::{Method, Request};
+use cornu_core::{Captured, Method, Request, capture, store};
 use cornu_storage::{HistoryEntry, Outcome, moved_path};
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 use tokio::task::AbortHandle;
@@ -17,7 +17,7 @@ use crate::project::Project;
 use crate::response::ResponseView;
 use crate::runner::{RunTarget, RunnerAction, RunnerTab, StepInfo, folder_requests};
 use crate::tree::{Tree, TreeAction, method_color};
-use crate::widgets::{variable_field, vertical_split};
+use crate::widgets::{captured_lines, variable_field, vertical_split};
 use crate::worker::{DocId, Worker};
 
 const SEND_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
@@ -45,6 +45,7 @@ struct RequestDoc {
     state: SendState,
     editor: EditorState,
     unresolved: Vec<String>,
+    captured: Vec<Captured>,
 }
 
 impl RequestDoc {
@@ -55,6 +56,7 @@ impl RequestDoc {
             state: SendState::Idle,
             editor: EditorState::default(),
             unresolved: Vec::new(),
+            captured: Vec::new(),
         }
     }
 
@@ -544,6 +546,10 @@ impl CornuApp {
                 source: document.path.clone(),
                 outcome,
             };
+            if let Ok(response) = &done.result {
+                doc.captured = capture(&sent.captures, response);
+                store(&mut self.project.captured, &doc.captured);
+            }
             doc.state = match done.result {
                 Ok(response) => SendState::Done(Box::new(ResponseView::new(response))),
                 Err(error) => SendState::Failed(error.to_string()),
@@ -918,6 +924,7 @@ impl CornuApp {
             request.auth = self.project.effective_auth(path.as_deref(), &request.auth);
             let resolved = request.resolve(&variables);
             doc.unresolved = resolved.unresolved;
+            doc.captured.clear();
             let abort = self.worker.send(&ctx, id, resolved.request);
             doc.state = SendState::Sending {
                 abort,
@@ -943,6 +950,7 @@ impl CornuApp {
                         format!("⚠ Sent with unresolved variables: {names}"),
                     );
                 }
+                captured_lines(ui, &doc.captured);
                 response_view(ui, &mut doc.state);
             },
         );
@@ -1292,6 +1300,35 @@ fn response_view(ui: &mut egui::Ui, state: &mut SendState) {
     }
 }
 
+fn captured_menu(ui: &mut egui::Ui, captured: &mut Vec<(String, String)>) {
+    if captured.is_empty() {
+        return;
+    }
+    let mut clear = false;
+    ui.menu_button(format!("⚡ {}", captured.len()), |ui| {
+        ui.weak("Captured this session, over every saved variable");
+        egui::Grid::new("captured-variables")
+            .num_columns(2)
+            .striped(true)
+            .show(ui, |ui| {
+                for (name, value) in captured.iter() {
+                    ui.monospace(name);
+                    ui.label(format::truncate(value, 60));
+                    ui.end_row();
+                }
+            });
+        if ui.button("Clear").clicked() {
+            clear = true;
+            ui.close();
+        }
+    })
+    .response
+    .on_hover_text("Captured variables");
+    if clear {
+        captured.clear();
+    }
+}
+
 impl eframe::App for CornuApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.collect_completed();
@@ -1309,12 +1346,17 @@ impl eframe::App for CornuApp {
 
         egui::Panel::top("tabs").show(ui, |ui| {
             ui.horizontal(|ui| {
-                let selector_width = 240.0;
+                let selector_width = if self.project.captured.is_empty() {
+                    240.0
+                } else {
+                    310.0
+                };
                 let tabs_width = (ui.available_width() - selector_width).max(120.0);
                 let height = ui.spacing().interact_size.y;
                 ui.allocate_ui(egui::vec2(tabs_width, height), |ui| self.tab_bar(ui));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     self.environments.selector(ui, &self.project);
+                    captured_menu(ui, &mut self.project.captured);
                 });
             });
         });
@@ -1499,5 +1541,61 @@ mod tests {
             app.tab_title(app.documents.iter().find(|d| d.id == id).unwrap()),
             "▶ Users"
         );
+    }
+
+    #[test]
+    fn sent_requests_capture_values_into_session_variables() {
+        use cornu_core::Capture;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let server = runtime.block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"access_token": "fresh"})),
+                )
+                .mount(&server)
+                .await;
+            server
+        });
+
+        let mut app = CornuApp::new(Worker::new().unwrap(), None);
+        let request = Request::new(Method::Post, format!("{}/login", server.uri()))
+            .with_capture(Capture::body("token", "$.access_token"))
+            .with_capture(Capture::header("session", "X-Session"));
+        app.open_draft(request.clone());
+        let id = app.active.unwrap();
+        let ctx = egui::Context::default();
+        let abort = app.worker.send(&ctx, id, request.clone());
+        let doc = app.documents.iter_mut().find(|doc| doc.id == id).unwrap();
+        let Content::Request(doc) = &mut doc.content else {
+            panic!("not a request")
+        };
+        doc.state = SendState::Sending {
+            abort,
+            started: Instant::now(),
+            sent: Box::new(request),
+            timestamp: 0,
+        };
+
+        let started = Instant::now();
+        while app.project.captured.is_empty() && started.elapsed().as_secs() < 5 {
+            app.collect_completed();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(app.project.captured, [("token".into(), "fresh".into())]);
+        assert_eq!(
+            app.project.variables(None, None).get("token"),
+            Some("fresh")
+        );
+
+        let mut output = ctx.run_ui(Default::default(), |ui| app.request_view(ui, id));
+        output.textures_delta.clear();
+        let shapes = format!("{:?}", output.shapes);
+        assert!(shapes.contains("Captured token = fresh"), "{shapes}");
+        assert!(shapes.contains("Could not capture session"), "{shapes}");
     }
 }

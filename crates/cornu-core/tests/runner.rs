@@ -237,3 +237,51 @@ async fn csv_rows_drive_the_iterations() {
     assert_eq!(summary.succeeded, 2);
     assert!(results[1].request.url.ends_with("/users/2/grace"));
 }
+
+#[tokio::test]
+async fn captures_feed_later_steps_of_the_same_iteration() {
+    use cornu_core::Capture;
+    use wiremock::matchers::header;
+
+    let server = MockServer::start().await;
+    Mock::given(path_regex("^/login/(alice|bob)$"))
+        .respond_with(|request: &wiremock::Request| {
+            let user = request.url.path().rsplit('/').next().unwrap().to_owned();
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "token": format!("t-{user}") }))
+        })
+        .mount(&server)
+        .await;
+    for user in ["alice", "bob"] {
+        Mock::given(path("/me"))
+            .and(header("authorization", format!("Bearer t-{user}").as_str()))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+
+    let base = server.uri();
+    let mut login = step("{{base}}/login/{{user}}".into(), &[("base", &base)]);
+    login.request = login
+        .request
+        .with_capture(Capture::body("token", "$.token"))
+        .with_capture(Capture::body("missing", "$.nope"));
+    let mut me = step("{{base}}/me".into(), &[("base", &base), ("token", "stale")]);
+    me.request = me.request.with_header("Authorization", "Bearer {{token}}");
+    let plan = RunPlan {
+        steps: vec![login, me],
+        rows: vec![row(&[("user", "alice")]), row(&[("user", "bob")])],
+        options: RunOptions {
+            concurrency: 2,
+            ..RunOptions::default()
+        },
+    };
+
+    let (summary, results) = execute(plan, &CancelToken::default()).await;
+    assert_eq!(summary.succeeded, 4);
+    let captured = &results[0].captured;
+    assert_eq!(captured[0].value.as_deref(), Ok("t-alice"));
+    assert!(captured[1].value.is_err());
+    assert!(results[1].captured.is_empty());
+}
