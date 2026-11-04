@@ -15,6 +15,7 @@ mod response;
 mod runner;
 mod schema;
 mod tree;
+mod websocket;
 mod widgets;
 mod worker;
 

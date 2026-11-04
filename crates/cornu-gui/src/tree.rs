@@ -218,13 +218,15 @@ fn folder_id(path: &Path) -> egui::Id {
 fn request_label(ui: &egui::Ui, entry: &RequestEntry) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     let method = &entry.request.method;
+    let (label, color) = if cornu_core::is_websocket_url(&entry.request.url) {
+        ("WS", websocket_color(ui.visuals()))
+    } else {
+        (short_method(method), method_color(method, ui.visuals()))
+    };
     job.append(
-        &format!("{:<4} ", short_method(method)),
+        &format!("{label:<4} "),
         0.0,
-        egui::TextFormat::simple(
-            egui::FontId::monospace(10.0),
-            method_color(method, ui.visuals()),
-        ),
+        egui::TextFormat::simple(egui::FontId::monospace(10.0), color),
     );
     let name = if entry.request.name.is_empty() {
         "Untitled request"
@@ -248,6 +250,14 @@ fn short_method(method: &Method) -> &str {
         Method::Options => "OPT",
         Method::Patch => "PTCH",
         other => other.as_str(),
+    }
+}
+
+pub fn websocket_color(visuals: &egui::Visuals) -> egui::Color32 {
+    if visuals.dark_mode {
+        egui::Color32::from_rgb(0x6c, 0xd6, 0xd0)
+    } else {
+        egui::Color32::from_rgb(0x00, 0x7c, 0x78)
     }
 }
 

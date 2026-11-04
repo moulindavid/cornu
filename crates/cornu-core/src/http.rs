@@ -154,6 +154,8 @@ pub enum SendError {
     InvalidCertificate { path: PathBuf, message: String },
     #[error("invalid GraphQL variables: {0}")]
     InvalidGraphqlVariables(String),
+    #[error("WebSocket: {0}")]
+    WebSocket(String),
     #[error("request timed out")]
     Timeout,
     #[error("cancelled")]
@@ -301,6 +303,24 @@ impl HttpClient {
     }
 
     pub async fn send(&self, request: &Request) -> Result<Response, SendError> {
+        let builder = self.prepare(request).await?;
+        let started = Instant::now();
+        let response = builder.send().await?;
+        let (status, headers) = (response.status().as_u16(), response_headers(&response));
+        let body = response.bytes().await?.to_vec();
+        Ok(Response {
+            status,
+            headers,
+            body,
+            elapsed: started.elapsed(),
+        })
+    }
+
+    /// The request ready to send, with its auth, headers and body.
+    pub(crate) async fn prepare(
+        &self,
+        request: &Request,
+    ) -> Result<reqwest::RequestBuilder, SendError> {
         let authorized;
         let request = match &request.auth {
             Auth::OAuth2(config) => {
@@ -330,8 +350,8 @@ impl HttpClient {
             Some(plain) if request.has_header("cookie") => plain,
             _ => &self.client,
         };
-        let mut builder = client.request(method, url).headers(headers);
-        builder = match &request.body {
+        let builder = client.request(method, url).headers(headers);
+        Ok(match &request.body {
             Body::None => builder,
             Body::Raw { text, .. } | Body::Json { text } => builder.body(text.clone()),
             Body::FormUrlEncoded { fields } => {
@@ -346,28 +366,19 @@ impl HttpClient {
                 Body::graphql_payload(query, variables)
                     .map_err(|error| SendError::InvalidGraphqlVariables(error.to_string()))?,
             ),
-        };
-
-        let started = Instant::now();
-        let response = builder.send().await?;
-        let status = response.status().as_u16();
-        let headers = response
-            .headers()
-            .iter()
-            .map(|(name, value)| {
-                let value = String::from_utf8_lossy(value.as_bytes()).into_owned();
-                (name.as_str().to_owned(), value)
-            })
-            .collect();
-        let body = response.bytes().await?.to_vec();
-
-        Ok(Response {
-            status,
-            headers,
-            body,
-            elapsed: started.elapsed(),
         })
     }
+}
+
+pub(crate) fn response_headers(response: &reqwest::Response) -> Vec<(String, String)> {
+    response
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            let value = String::from_utf8_lossy(value.as_bytes()).into_owned();
+            (name.as_str().to_owned(), value)
+        })
+        .collect()
 }
 
 fn build_url(request: &Request) -> Result<Url, SendError> {

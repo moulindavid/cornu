@@ -13,6 +13,7 @@ mod request;
 mod response;
 pub mod runner;
 mod variables;
+mod websocket;
 
 pub use assertion::{AssertSource, Assertion, AssertionResult, Operator, check, passed};
 pub use auth::{ApiKeyLocation, Auth};
@@ -29,5 +30,7 @@ pub use oauth2::{
 pub use request::{Request, Resolved};
 pub use response::Response;
 pub use variables::{DYNAMIC_VARIABLES, Interpolated, Segment, Variables, is_dynamic, segments};
+
+pub use websocket::{WebSocket, WsCommand, WsEvent, WsMessage, is_websocket_url};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

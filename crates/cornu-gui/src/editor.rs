@@ -39,6 +39,8 @@ pub struct EditorState {
     pub schema: SchemaPanel,
     completion: CompletionPopup,
     pub token: TokenPanel,
+    /// Messages are composed next to the log, and captures and tests do not apply.
+    pub websocket: bool,
 }
 
 pub fn request_editor(
@@ -58,10 +60,18 @@ pub fn request_editor(
             AuthKind::Inherit => "Auth".to_owned(),
             kind => format!("Auth ({})", kind.label()),
         };
+        if state.websocket && matches!(state.tab, Tab::Body | Tab::Captures | Tab::Tests) {
+            state.tab = Tab::Params;
+        }
         ui.selectable_value(&mut state.tab, Tab::Params, params);
         ui.selectable_value(&mut state.tab, Tab::Headers, headers);
-        ui.selectable_value(&mut state.tab, Tab::Body, body);
+        if !state.websocket {
+            ui.selectable_value(&mut state.tab, Tab::Body, body);
+        }
         ui.selectable_value(&mut state.tab, Tab::Auth, auth);
+        if state.websocket {
+            return;
+        }
         let captures = match request.captures.iter().filter(|c| c.enabled).count() {
             0 => "Captures".to_owned(),
             count => format!("Captures ({count})"),
@@ -917,6 +927,27 @@ mod tests {
         let code = render(Grant::AuthorizationCode);
         for expected in ["Authorization URL", "Redirect URI", "PKCE"] {
             assert!(code.contains(expected), "{expected} in {code}");
+        }
+    }
+
+    #[test]
+    fn websocket_requests_hide_body_captures_and_tests() {
+        let mut request = Request::new(Method::Get, "ws://localhost/chat");
+        let mut state = EditorState {
+            tab: Tab::Tests,
+            websocket: true,
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            request_editor(ui, egui::Id::unique("editor"), &mut request, &mut state);
+        });
+        output.textures_delta.clear();
+        let text = format!("{:?}", output.shapes);
+        assert_eq!(state.tab, Tab::Params);
+        assert!(text.contains("Headers") && text.contains("Auth"), "{text}");
+        for hidden in ["Body", "Captures", "Tests"] {
+            assert!(!text.contains(hidden), "{hidden} in {text}");
         }
     }
 }

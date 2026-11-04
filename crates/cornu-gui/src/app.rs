@@ -22,7 +22,8 @@ use crate::oauth::{Flow, FlowEvent, TokenAction, TokenPanel};
 use crate::project::Project;
 use crate::response::ResponseView;
 use crate::runner::{RunTarget, RunnerAction, RunnerTab, StepInfo, folder_requests};
-use crate::tree::{Tree, TreeAction, method_color};
+use crate::tree::{Tree, TreeAction, method_color, websocket_color};
+use crate::websocket::{SocketAction, SocketView, message, set_message};
 use crate::widgets::{assertion_lines, captured_lines, variable_field, vertical_split};
 use crate::worker::{DocId, Worker};
 
@@ -55,6 +56,7 @@ struct RequestDoc {
     unresolved: Vec<String>,
     captured: Vec<Captured>,
     assertions: Vec<AssertionResult>,
+    socket: Option<SocketView>,
 }
 
 impl RequestDoc {
@@ -67,6 +69,7 @@ impl RequestDoc {
             unresolved: Vec::new(),
             captured: Vec::new(),
             assertions: Vec::new(),
+            socket: None,
         }
     }
 
@@ -248,6 +251,11 @@ impl CornuApp {
 
     /// Drafts stay listed in the sidebar; saved documents can be reopened from the tree.
     fn close(&mut self, id: DocId) {
+        if let Some(doc) = self.documents.iter_mut().find(|doc| doc.id == id)
+            && let Content::Request(doc) = &mut doc.content
+        {
+            doc.socket = None;
+        }
         if let Some(index) = self.open_tabs.iter().position(|tab| *tab == id) {
             self.open_tabs.remove(index);
             if self.active == Some(id) {
@@ -993,23 +1001,51 @@ impl CornuApp {
             });
         }
 
+        let websocket = cornu_core::is_websocket_url(&variables.interpolate(&doc.request.url).text);
+        if let Some(socket) = &mut doc.socket {
+            socket.poll();
+        }
+        let socket_live = doc.socket.as_ref().is_some_and(SocketView::is_live);
+        let mut send_message = false;
         let mut send = send_pressed;
+        if websocket && send_pressed && socket_live {
+            send = false;
+            send_message = true;
+        }
+        let mut disconnect = false;
         let mut cancel = false;
         let mut save = false;
         let mut copy_curl = false;
         let mut run = false;
         ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt(("method", id))
-                .selected_text(doc.request.method.as_str())
-                .width(90.0)
-                .show_ui(ui, |ui| {
-                    for method in Method::STANDARD {
-                        let label = method.to_string();
-                        ui.selectable_value(&mut doc.request.method, method, label);
-                    }
-                });
+            if websocket {
+                ui.add_sized(
+                    [90.0, ui.spacing().interact_size.y],
+                    egui::Label::new(
+                        egui::RichText::new("WS")
+                            .monospace()
+                            .color(websocket_color(ui.visuals())),
+                    ),
+                )
+                .on_hover_text("ws:// and wss:// URLs open a WebSocket");
+            } else {
+                egui::ComboBox::from_id_salt(("method", id))
+                    .selected_text(doc.request.method.as_str())
+                    .width(90.0)
+                    .show_ui(ui, |ui| {
+                        for method in Method::STANDARD {
+                            let label = method.to_string();
+                            ui.selectable_value(&mut doc.request.method, method, label);
+                        }
+                    });
+            }
             let sending = matches!(doc.state, SendState::Sending { .. });
-            let button = if sending { "Cancel" } else { "Send" };
+            let button = match (websocket, socket_live, sending) {
+                (true, true, _) => "Disconnect",
+                (true, false, _) => "Connect",
+                (false, _, true) => "Cancel",
+                (false, _, false) => "Send",
+            };
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let save_button = ui.add_enabled(
                     doc.saved.is_none() || doc.is_modified(),
@@ -1027,7 +1063,9 @@ impl CornuApp {
                     }
                 });
                 if ui.button(button).clicked() {
-                    if sending {
+                    if websocket && socket_live {
+                        disconnect = true;
+                    } else if sending && !websocket {
                         cancel = true;
                     } else {
                         send = true;
@@ -1068,6 +1106,27 @@ impl CornuApp {
             }));
         }
 
+        if websocket && (send || send_message || disconnect) {
+            if disconnect {
+                if let Some(socket) = &mut doc.socket {
+                    socket.disconnect();
+                }
+            } else if send_message {
+                if let Some(socket) = &doc.socket {
+                    let text = variables.interpolate(message(&doc.request.body)).text;
+                    socket.send(cornu_core::WsMessage::Text(text));
+                }
+            } else {
+                let mut request = doc.request.clone();
+                request.auth = self.project.effective_auth(path.as_deref(), &request.auth);
+                let resolved = request.resolve(&variables);
+                doc.unresolved = resolved.unresolved;
+                doc.socket = Some(SocketView::new(
+                    self.worker.websocket(&ctx, resolved.request),
+                ));
+            }
+            send = false;
+        }
         if cancel && let SendState::Sending { abort, .. } = &doc.state {
             abort.abort();
             doc.state = SendState::Failed("Cancelled".into());
@@ -1097,6 +1156,8 @@ impl CornuApp {
             self.oauth.as_ref(),
         );
         let editor_id = egui::Id::unique(("editor", id));
+        doc.editor.websocket = websocket;
+        let mut composed = message(&doc.request.body).to_owned();
         vertical_split(
             ui,
             egui::Id::unique("response-split"),
@@ -1104,6 +1165,29 @@ impl CornuApp {
             |ui| editor::request_editor(ui, editor_id, &mut doc.request, &mut doc.editor),
             |ui| {
                 ui.add_space(6.0);
+                if websocket {
+                    if !doc.unresolved.is_empty() && doc.socket.is_some() {
+                        let names = doc.unresolved.join(", ");
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            format!("⚠ Connected with unresolved variables: {names}"),
+                        );
+                    }
+                    match &mut doc.socket {
+                        Some(socket) => match socket.show(ui, &mut composed) {
+                            Some(SocketAction::Send) => {
+                                let text = variables.interpolate(&composed).text;
+                                socket.send(cornu_core::WsMessage::Text(text));
+                            }
+                            Some(SocketAction::Disconnect) => socket.disconnect(),
+                            None => {}
+                        },
+                        None => {
+                            ui.weak("Connect to open the WebSocket (Ctrl+Enter).");
+                        }
+                    }
+                    return;
+                }
                 if !doc.unresolved.is_empty() && !matches!(doc.state, SendState::Idle) {
                     let names = doc.unresolved.join(", ");
                     ui.colored_label(
@@ -1116,6 +1200,9 @@ impl CornuApp {
                 response_view(ui, &mut doc.state);
             },
         );
+        if websocket {
+            set_message(&mut doc.request.body, composed);
+        }
         if doc.editor.schema.take_fetch_request() {
             let mut request = doc.request.clone();
             request.auth = self.project.effective_auth(path.as_deref(), &request.auth);

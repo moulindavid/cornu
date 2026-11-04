@@ -6,6 +6,8 @@ use eframe::egui;
 use tokio::runtime::Runtime;
 use tokio::task::AbortHandle;
 
+use crate::websocket::{SocketHandle, SocketUpdate};
+
 pub type DocId = u64;
 
 pub struct Completed {
@@ -109,6 +111,36 @@ impl Worker {
             ctx.request_repaint();
         });
         (rx, task.abort_handle())
+    }
+
+    pub fn websocket(&self, ctx: &egui::Context, request: Request) -> SocketHandle {
+        let (commands, command_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, updates) = channel();
+        let client = self.client.clone();
+        let ctx = ctx.clone();
+        let task = self.runtime.spawn(async move {
+            match client.connect_websocket(&request).await {
+                Ok((handshake, socket)) => {
+                    let _ = tx.send(SocketUpdate::Connected(handshake));
+                    ctx.request_repaint();
+                    socket
+                        .run(command_rx, |event| {
+                            let _ = tx.send(SocketUpdate::Event(event));
+                            ctx.request_repaint();
+                        })
+                        .await;
+                }
+                Err(error) => {
+                    let _ = tx.send(SocketUpdate::Failed(error.to_string()));
+                    ctx.request_repaint();
+                }
+            }
+        });
+        SocketHandle {
+            commands,
+            updates,
+            abort: task.abort_handle(),
+        }
     }
 
     pub fn start_run(&self, ctx: &egui::Context, plan: RunPlan) -> RunHandle {
