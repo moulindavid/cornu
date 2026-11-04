@@ -8,6 +8,7 @@ pub mod graphql;
 mod http;
 pub mod key_value;
 mod method;
+mod oauth2;
 mod request;
 mod response;
 pub mod runner;
@@ -22,6 +23,9 @@ pub use environment::Environment;
 pub use http::{ClientOptions, HttpClient, SendError};
 pub use key_value::KeyValue;
 pub use method::{InvalidMethod, Method};
+pub use oauth2::{
+    ClientAuth, DEFAULT_REDIRECT_URI, Grant, OAuth2, Token, TokenFileError, TokenStore,
+};
 pub use request::{Request, Resolved};
 pub use response::Response;
 pub use variables::{DYNAMIC_VARIABLES, Interpolated, Segment, Variables, is_dynamic, segments};

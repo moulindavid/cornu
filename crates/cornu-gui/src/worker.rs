@@ -1,7 +1,7 @@
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use cornu_core::runner::{CancelToken, RunPlan, RunSummary, StepResult};
-use cornu_core::{ClientOptions, CookieJar, HttpClient, Request, Response, SendError};
+use cornu_core::{ClientOptions, CookieJar, HttpClient, Request, Response, SendError, TokenStore};
 use eframe::egui;
 use tokio::runtime::Runtime;
 use tokio::task::AbortHandle;
@@ -28,6 +28,7 @@ pub struct Worker {
     runtime: Runtime,
     client: HttpClient,
     cookies: CookieJar,
+    tokens: TokenStore,
     tx: Sender<Completed>,
     rx: Receiver<Completed>,
 }
@@ -40,12 +41,15 @@ impl Worker {
             .enable_all()
             .build()?;
         let cookies = CookieJar::default();
-        let client = HttpClient::with_cookies(&ClientOptions::default(), cookies.clone())?;
+        let tokens = TokenStore::default();
+        let client = HttpClient::with_cookies(&ClientOptions::default(), cookies.clone())?
+            .with_tokens(tokens.clone());
         let (tx, rx) = channel();
         Ok(Self {
             runtime,
             client,
             cookies,
+            tokens,
             tx,
             rx,
         })
@@ -53,6 +57,10 @@ impl Worker {
 
     pub fn cookies(&self) -> &CookieJar {
         &self.cookies
+    }
+
+    pub fn tokens(&self) -> &TokenStore {
+        &self.tokens
     }
 
     pub fn send(&self, ctx: &egui::Context, doc: DocId, request: Request) -> AbortHandle {
@@ -74,14 +82,26 @@ impl Worker {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
+        self.spawn(ctx, job).0
+    }
+
+    pub fn spawn<T, F>(
+        &self,
+        ctx: &egui::Context,
+        job: impl FnOnce(HttpClient) -> F,
+    ) -> (Receiver<T>, AbortHandle)
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
         let future = job(self.client.clone());
         let (tx, rx) = channel();
         let ctx = ctx.clone();
-        self.runtime.spawn(async move {
+        let task = self.runtime.spawn(async move {
             let _ = tx.send(future.await);
             ctx.request_repaint();
         });
-        rx
+        (rx, task.abort_handle())
     }
 
     pub fn start_run(&self, ctx: &egui::Context, plan: RunPlan) -> RunHandle {

@@ -6,7 +6,9 @@ use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{multipart, redirect};
 use url::Url;
 
-use crate::{Body, CookieJar, PartValue, Request, Response, key_value};
+use crate::{
+    Auth, Body, CookieJar, OAuth2, PartValue, Request, Response, Token, TokenStore, key_value,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientOptions {
@@ -43,6 +45,8 @@ pub enum SendError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("OAuth2: {0}")]
+    OAuth(String),
     #[error("invalid GraphQL variables: {0}")]
     InvalidGraphqlVariables(String),
     #[error("request timed out")]
@@ -84,6 +88,7 @@ pub struct HttpClient {
     /// Without the cookie jar, for requests that set their own `Cookie` header: reqwest would
     /// replace it with the jar's.
     plain: Option<reqwest::Client>,
+    tokens: TokenStore,
 }
 
 fn builder(options: &ClientOptions) -> reqwest::ClientBuilder {
@@ -106,6 +111,7 @@ impl HttpClient {
         Ok(Self {
             client: builder(options).build()?,
             plain: None,
+            tokens: TokenStore::default(),
         })
     }
 
@@ -116,10 +122,42 @@ impl HttpClient {
                 .cookie_provider(std::sync::Arc::new(jar))
                 .build()?,
             plain: Some(builder(options).build()?),
+            tokens: TokenStore::default(),
         })
     }
 
+    /// OAuth2 tokens are taken from and stored in `tokens`.
+    pub fn with_tokens(mut self, tokens: TokenStore) -> Self {
+        self.tokens = tokens;
+        self
+    }
+
+    pub fn tokens(&self) -> &TokenStore {
+        &self.tokens
+    }
+
+    /// Always asks the server, even when a valid token is stored. `open` gets the URL to show in
+    /// a browser for the authorization code grant.
+    pub async fn new_token(
+        &self,
+        config: &OAuth2,
+        open: impl FnOnce(&Url),
+    ) -> Result<Token, SendError> {
+        crate::oauth2::new_token(&self.client, &self.tokens, config, open).await
+    }
+
     pub async fn send(&self, request: &Request) -> Result<Response, SendError> {
+        let authorized;
+        let request = match &request.auth {
+            Auth::OAuth2(config) => {
+                let token = crate::oauth2::token(&self.client, &self.tokens, config).await?;
+                authorized = request.clone().with_auth(Auth::Bearer {
+                    token: token.access_token,
+                });
+                &authorized
+            }
+            _ => request,
+        };
         let url = build_url(request)?;
         let mut headers = build_headers(request)?;
         let method = reqwest::Method::from_bytes(request.method.as_str().as_bytes())

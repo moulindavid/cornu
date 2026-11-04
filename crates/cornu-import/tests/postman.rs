@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use cornu_core::{ApiKeyLocation, Auth, Body, KeyValue, Method, PartValue, Request};
+use cornu_core::{
+    ApiKeyLocation, Auth, Body, ClientAuth, Grant, KeyValue, Method, OAuth2, PartValue, Request,
+};
 use cornu_import::postman::parse_collection;
 use cornu_import::{Collection, ImportError, ImportedFolder, ImportedItem};
 use cornu_storage::{Item, Workspace};
@@ -131,6 +133,18 @@ fn bodies_are_converted() {
     assert!(matches!(&login.body, Body::FormUrlEncoded { fields } if !fields[1].enabled));
 
     let graphql = request(&root, "Countries (GraphQL)");
+    assert_eq!(
+        graphql.auth,
+        Auth::OAuth2(OAuth2 {
+            grant: Grant::ClientCredentials,
+            token_url: "https://auth.example.com/oauth/token".into(),
+            client_id: "{{client_id}}".into(),
+            client_secret: "{{client_secret}}".into(),
+            scope: "read write".into(),
+            client_auth: ClientAuth::Body,
+            ..Default::default()
+        })
+    );
     let Body::GraphQl { query, variables } = &graphql.body else {
         panic!("expected graphql");
     };
@@ -157,13 +171,12 @@ fn bodies_are_converted() {
 fn unsupported_parts_produce_warnings() {
     let warnings = collection().warnings;
     let all = warnings.join("\n");
-    assert!(all.contains("oauth2 auth is not supported"), "{all}");
     assert!(
         all.contains("2 pre-request or test script(s) skipped"),
         "{all}"
     );
     assert!(all.contains("1 saved example response(s) skipped"), "{all}");
-    assert_eq!(warnings.len(), 3, "{all}");
+    assert_eq!(warnings.len(), 2, "{all}");
 }
 
 #[test]
@@ -223,4 +236,32 @@ fn imported_collection_is_written_as_a_folder() {
         .find_request(Path::new("pet-store/pets/nested/login.req.toml"))
         .unwrap();
     assert_eq!(login.request.url, "https://auth.example.com/oauth/token");
+}
+
+#[test]
+fn oauth2_grants_map_to_pkce_or_are_dropped() {
+    let collection = |grant: &str| {
+        parse_collection(&format!(
+            r#"{{"info": {{"name": "C", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"}},
+            "auth": {{"type": "oauth2", "oauth2": [
+                {{"key": "grant_type", "value": "{grant}"}},
+                {{"key": "authUrl", "value": "https://auth.example/authorize"}},
+                {{"key": "redirect_uri", "value": "http://localhost:5000/cb"}}
+            ]}},
+            "item": []}}"#
+        ))
+        .unwrap()
+    };
+    let pkce = collection("authorization_code_with_pkce");
+    let Auth::OAuth2(config) = &pkce.root.auth else {
+        panic!("expected oauth2, got {:?}", pkce.root.auth);
+    };
+    assert_eq!(config.grant, Grant::AuthorizationCode);
+    assert_eq!(config.auth_url, "https://auth.example/authorize");
+    assert_eq!(config.redirect_uri, "http://localhost:5000/cb");
+    assert_eq!(config.client_auth, ClientAuth::Header);
+
+    let password = collection("password_credentials");
+    assert_eq!(password.root.auth, Auth::None);
+    assert!(password.warnings[0].contains("password_credentials grant is not supported"));
 }

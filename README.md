@@ -17,6 +17,7 @@ and plain text files you can commit to git.
 - Request chaining: capture response values (JSONPath, headers, status) into variables
 - Response tests: assert on status, headers, JSONPath values, time and size
 - Cookie jar per workspace, kept outside git, with a viewer to inspect and delete cookies
+- OAuth 2.0: client credentials and authorization code with PKCE, tokens fetched, cached and refreshed automatically
 - Native desktop GUI built with [egui](https://github.com/emilk/egui)
 
 ## Building

@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use cornu_core::runner::{RunPlan, Step};
-use cornu_core::{Assertion, AssertionResult, Captured, Method, Request, capture, check, store};
+use cornu_core::{
+    Assertion, AssertionResult, Auth, Captured, Method, OAuth2, Request, capture, check, store,
+};
 use cornu_storage::{HistoryEntry, Outcome, moved_path};
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 use tokio::task::AbortHandle;
@@ -14,6 +16,7 @@ use crate::folder::{FolderTab, folder_view};
 use crate::format;
 use crate::history::{HistoryAction, HistoryPanel};
 use crate::import::SpecImport;
+use crate::oauth::{Flow, FlowEvent, TokenAction, TokenPanel};
 use crate::project::Project;
 use crate::response::ResponseView;
 use crate::runner::{RunTarget, RunnerAction, RunnerTab, StepInfo, folder_requests};
@@ -132,6 +135,8 @@ pub struct CornuApp {
     cookies: CookiesWindow,
     /// The jar revision last written to disk.
     cookies_saved: u64,
+    tokens_saved: u64,
+    oauth: Option<Flow>,
 }
 
 impl CornuApp {
@@ -154,6 +159,8 @@ impl CornuApp {
             spec_import: SpecImport::default(),
             cookies: CookiesWindow::default(),
             cookies_saved: 0,
+            tokens_saved: 0,
+            oauth: None,
         };
         if let Some(root) = workspace {
             app.switch_workspace(Project::open(&root));
@@ -437,38 +444,82 @@ impl CornuApp {
             }),
         };
         self.project = project;
-        self.load_cookies();
+        self.load_local_state();
         self.environments.reset();
         self.tree = Tree::default();
     }
 
-    fn load_cookies(&mut self) {
-        let jar = self.worker.cookies();
-        let loaded = match self.project.root() {
-            Some(root) => cornu_storage::load_cookies(root, jar),
-            None => {
+    /// Cookies and OAuth2 tokens; a scratch workspace, or a file that cannot be read, starts
+    /// without any.
+    fn load_local_state(&mut self) {
+        let (jar, tokens) = (self.worker.cookies(), self.worker.tokens());
+        jar.clear();
+        tokens.clear();
+        if let Some(root) = self.project.root() {
+            let mut errors = Vec::new();
+            if let Err(error) = cornu_storage::load_cookies(root, jar) {
                 jar.clear();
-                Ok(())
+                errors.push(format!("Cookies not loaded: {error}"));
             }
-        };
-        if let Err(error) = loaded {
-            jar.clear();
-            self.notice = Some(Notice::error(format!("Cookies not loaded: {error}")));
+            if let Err(error) = cornu_storage::load_tokens(root, tokens) {
+                tokens.clear();
+                errors.push(format!("OAuth2 tokens not loaded: {error}"));
+            }
+            if !errors.is_empty() {
+                self.notice = Some(Notice::error(errors.join("; ")));
+            }
         }
         self.cookies_saved = jar.revision();
+        self.tokens_saved = tokens.revision();
     }
 
-    fn save_cookies(&mut self) {
-        let jar = self.worker.cookies();
-        if jar.revision() == self.cookies_saved {
+    fn save_local_state(&mut self) {
+        let (jar, tokens) = (self.worker.cookies(), self.worker.tokens());
+        let root = self.project.root();
+        if jar.revision() != self.cookies_saved {
+            self.cookies_saved = jar.revision();
+            if let Some(root) = root
+                && let Err(error) = cornu_storage::save_cookies(root, jar)
+            {
+                self.notice = Some(Notice::error(format!("Cookies not saved: {error}")));
+            }
+        }
+        if tokens.revision() != self.tokens_saved {
+            self.tokens_saved = tokens.revision();
+            if let Some(root) = root
+                && let Err(error) = cornu_storage::save_tokens(root, tokens)
+            {
+                self.notice = Some(Notice::error(format!("OAuth2 tokens not saved: {error}")));
+            }
+        }
+    }
+
+    fn token_action(&mut self, ctx: &egui::Context, action: TokenAction, config: OAuth2) {
+        match action {
+            TokenAction::Get => {
+                if let Some(flow) = self.oauth.take() {
+                    flow.cancel();
+                }
+                self.oauth = Some(Flow::start(ctx, &self.worker, config));
+            }
+            TokenAction::Cancel => {
+                if let Some(flow) = self.oauth.take() {
+                    flow.cancel();
+                }
+            }
+            TokenAction::Clear => self.worker.tokens().remove(&config),
+        }
+    }
+
+    fn poll_token_flow(&mut self, ctx: &egui::Context) {
+        let Some(event) = self.oauth.as_mut().and_then(|flow| flow.poll(ctx)) else {
             return;
-        }
-        self.cookies_saved = jar.revision();
-        if let Some(root) = self.project.root()
-            && let Err(error) = cornu_storage::save_cookies(root, jar)
-        {
-            self.notice = Some(Notice::error(format!("Cookies not saved: {error}")));
-        }
+        };
+        self.oauth = None;
+        self.notice = Some(match event {
+            FlowEvent::Received => Notice::info("OAuth2 token received"),
+            FlowEvent::Failed(error) => Notice::error(format!("No OAuth2 token: {error}")),
+        });
     }
 
     fn apply(&mut self, ctx: &egui::Context, action: TreeAction) {
@@ -846,8 +897,22 @@ impl CornuApp {
         match &mut doc.content {
             Content::Folder(tab) => {
                 let path = doc.path.clone().unwrap_or_default();
-                if let Some(error) = folder_view(ui, &mut self.project, &path, tab) {
+                let mut token = match self.project.workspace.folder(&path) {
+                    Some(folder) => TokenPanel::new(
+                        &folder.settings.auth,
+                        &self
+                            .project
+                            .variables(Some(&path), self.environments.active),
+                        self.worker.tokens(),
+                        self.oauth.as_ref(),
+                    ),
+                    None => TokenPanel::default(),
+                };
+                if let Some(error) = folder_view(ui, &mut self.project, &path, tab, &mut token) {
                     self.notice = Some(Notice::error(error));
+                }
+                if let (Some(action), Some(config)) = (token.action, token.config) {
+                    self.token_action(ui.ctx(), action, config);
                 }
             }
             Content::Request(_) => self.request_view(ui, id),
@@ -948,7 +1013,14 @@ impl CornuApp {
         if copy_curl {
             let mut request = doc.request.clone();
             request.auth = self.project.effective_auth(path.as_deref(), &request.auth);
-            let resolved = request.resolve(&variables);
+            let mut resolved = request.resolve(&variables);
+            if let Auth::OAuth2(config) = &resolved.request.auth
+                && let Some(token) = self.worker.tokens().get(config)
+            {
+                resolved.request.auth = Auth::Bearer {
+                    token: token.access_token,
+                };
+            }
             ctx.copy_text(cornu_import::curl::to_curl(&resolved.request));
             self.notice = Some(Notice::info(if resolved.unresolved.is_empty() {
                 "Copied as cURL".to_owned()
@@ -982,6 +1054,12 @@ impl CornuApp {
         }
 
         ui.separator();
+        doc.editor.token = TokenPanel::new(
+            &doc.request.auth,
+            &variables,
+            self.worker.tokens(),
+            self.oauth.as_ref(),
+        );
         let editor_id = egui::Id::unique(("editor", id));
         vertical_split(
             ui,
@@ -1011,8 +1089,13 @@ impl CornuApp {
             });
             doc.editor.schema.start(pending);
         }
+        let token = &mut doc.editor.token;
+        let token_action = token.action.take().zip(token.config.take());
         if save {
             self.save(id);
+        }
+        if let Some((action, config)) = token_action {
+            self.token_action(&ctx, action, config);
         }
         if run {
             self.open_runner(None, RunTarget::Tab(id));
@@ -1380,6 +1463,7 @@ fn captured_menu(ui: &mut egui::Ui, captured: &mut Vec<(String, String)>) {
 impl eframe::App for CornuApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.collect_completed();
+        self.poll_token_flow(ui.ctx());
         if ui.input_mut(|input| input.consume_shortcut(&SAVE_SHORTCUT))
             && let Some(id) = self.active
         {
@@ -1424,7 +1508,7 @@ impl eframe::App for CornuApp {
         }
         let on_disk = self.project.is_on_disk();
         self.cookies.show(ui.ctx(), self.worker.cookies(), on_disk);
-        self.save_cookies();
+        self.save_local_state();
         self.dialogs(ui.ctx());
         if let Some(discovered) = self.spec_import.show(ui.ctx(), &self.worker) {
             self.import_collection(ui.ctx(), Ok(discovered.collection));
@@ -1695,7 +1779,7 @@ mod tests {
 
         let mut app = CornuApp::new(Worker::new().unwrap(), Some(dir.path().to_owned()));
         assert_eq!(send(&app, format!("{}/login", server.uri())), 204);
-        app.save_cookies();
+        app.save_local_state();
         assert!(cornu_storage::cookies_path(dir.path()).exists());
 
         let app = CornuApp::new(Worker::new().unwrap(), Some(dir.path().to_owned()));
@@ -1707,6 +1791,86 @@ mod tests {
         assert!(
             app.worker.cookies().list().is_empty(),
             "scratch starts empty"
+        );
+    }
+
+    #[test]
+    fn oauth2_tokens_are_fetched_saved_and_restored() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let server =
+            runtime.block_on(async {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/token"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(
+                        serde_json::json!({"access_token": "t1", "expires_in": 3600}),
+                    ))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                Mock::given(path("/api"))
+                    .and(header("authorization", "Bearer t1"))
+                    .respond_with(ResponseTemplate::new(200))
+                    .mount(&server)
+                    .await;
+                server
+            });
+        let dir = tempfile::tempdir().unwrap();
+        cornu_storage::Workspace::init(dir.path(), "Demo").unwrap();
+        let ctx = egui::Context::default();
+        let config = OAuth2 {
+            token_url: format!("{}/token", server.uri()),
+            client_id: "app".into(),
+            ..Default::default()
+        };
+        let auth = Auth::OAuth2(config.clone());
+
+        let mut app = CornuApp::new(Worker::new().unwrap(), Some(dir.path().to_owned()));
+        app.token_action(&ctx, TokenAction::Get, config.clone());
+        let panel = TokenPanel::new(
+            &auth,
+            &cornu_core::Variables::new(),
+            app.worker.tokens(),
+            app.oauth.as_ref(),
+        );
+        assert!(panel.pending);
+        for _ in 0..100 {
+            app.poll_token_flow(&ctx);
+            if app.oauth.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(
+            app.notice.as_ref().unwrap().message,
+            "OAuth2 token received"
+        );
+        app.save_local_state();
+        assert!(cornu_storage::tokens_path(dir.path()).exists());
+
+        let mut app = CornuApp::new(Worker::new().unwrap(), Some(dir.path().to_owned()));
+        assert_eq!(app.worker.tokens().get(&config).unwrap().access_token, "t1");
+        let url = format!("{}/api", server.uri());
+        let status = app
+            .worker
+            .run(&ctx, move |client| async move {
+                let request = Request::new(Method::Get, url).with_auth(auth);
+                client.send(&request).await.unwrap().status
+            })
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(
+            status, 200,
+            "the restored token is used, no new one is requested"
+        );
+
+        app.close_workspace();
+        assert!(
+            app.worker.tokens().is_empty(),
+            "scratch starts without tokens"
         );
     }
 }

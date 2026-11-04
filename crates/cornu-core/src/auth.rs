@@ -2,6 +2,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 
+use crate::OAuth2;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Auth {
@@ -22,6 +24,9 @@ pub enum Auth {
         #[serde(default)]
         location: ApiKeyLocation,
     },
+    /// The access token is fetched, cached and renewed by the client.
+    #[serde(rename = "oauth2")]
+    OAuth2(OAuth2),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +84,7 @@ impl Auth {
             Auth::Bearer { token } => vec![token],
             Auth::Basic { username, password } => vec![username, password],
             Auth::ApiKey { key, value, .. } => vec![key, value],
+            Auth::OAuth2(config) => config.fields_mut(),
         }
     }
 }
@@ -164,5 +170,19 @@ mod tests {
         );
         let round_trip: Wrapper = toml::from_str(&toml::to_string(&parsed).unwrap()).unwrap();
         assert_eq!(round_trip, parsed);
+
+        let oauth = Wrapper {
+            auth: Auth::OAuth2(OAuth2 {
+                token_url: "{{base}}/token".into(),
+                client_id: "app".into(),
+                ..Default::default()
+            }),
+        };
+        let text = toml::to_string(&oauth).unwrap();
+        assert_eq!(
+            text,
+            "[auth]\ntype = \"oauth2\"\ngrant = \"client_credentials\"\ntoken_url = \"{{base}}/token\"\nclient_id = \"app\"\n"
+        );
+        assert_eq!(toml::from_str::<Wrapper>(&text).unwrap(), oauth);
     }
 }

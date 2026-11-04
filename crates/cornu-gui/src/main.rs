@@ -7,6 +7,7 @@ mod format;
 mod highlight;
 mod history;
 mod import;
+mod oauth;
 mod project;
 mod query_editor;
 mod response;
