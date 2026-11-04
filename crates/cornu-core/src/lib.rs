@@ -20,7 +20,7 @@ pub use body::{Body, MultipartPart, PartValue};
 pub use capture::{Capture, CaptureError, CaptureSource, Captured, capture, store};
 pub use cookies::{CookieFileError, CookieInfo, CookieJar};
 pub use environment::Environment;
-pub use http::{ClientOptions, HttpClient, SendError};
+pub use http::{ClientOptions, HttpClient, ProxyMode, SendError};
 pub use key_value::KeyValue;
 pub use method::{InvalidMethod, Method};
 pub use oauth2::{

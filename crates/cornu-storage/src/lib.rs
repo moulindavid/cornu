@@ -9,7 +9,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use cornu_core::{Auth, Environment, KeyValue, Request, Variables};
+use cornu_core::{Auth, ClientOptions, Environment, KeyValue, Request, Variables};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -59,6 +59,9 @@ pub struct Settings {
     /// Only used on disk: once loaded, the position of `Folder::items` is the order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub order: Vec<String>,
+    /// Only read from the workspace's `cornu.toml`.
+    #[serde(default, skip_serializing_if = "ClientOptions::is_default")]
+    pub client: ClientOptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

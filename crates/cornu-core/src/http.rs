@@ -4,26 +4,127 @@ use std::time::{Duration, Instant};
 
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{multipart, redirect};
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::{
     Auth, Body, CookieJar, OAuth2, PartValue, Request, Response, Token, TokenStore, key_value,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Stored in the workspace's `cornu.toml`; relative paths are relative to the workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ClientOptions {
+    #[serde(with = "seconds", skip_serializing_if = "is_default_timeout")]
     pub timeout: Option<Duration>,
+    #[serde(skip_serializing_if = "is_true")]
     pub follow_redirects: bool,
+    #[serde(skip_serializing_if = "is_default_max_redirects")]
     pub max_redirects: usize,
+    #[serde(skip_serializing_if = "ProxyMode::is_system")]
+    pub proxy: ProxyMode,
+    /// Accepts any certificate and host name: for self-signed development servers only.
+    #[serde(skip_serializing_if = "is_false")]
+    pub insecure: bool,
+    /// PEM certificates trusted on top of the system ones.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ca_certificate: Option<PathBuf>,
+    /// PEM file holding the client certificate chain and its private key, for mutual TLS.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_certificate: Option<PathBuf>,
 }
+
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_MAX_REDIRECTS: usize = 10;
 
 impl Default for ClientOptions {
     fn default() -> Self {
         Self {
-            timeout: Some(Duration::from_secs(30)),
+            timeout: Some(DEFAULT_TIMEOUT),
             follow_redirects: true,
-            max_redirects: 10,
+            max_redirects: DEFAULT_MAX_REDIRECTS,
+            proxy: ProxyMode::System,
+            insecure: false,
+            ca_certificate: None,
+            client_certificate: None,
         }
+    }
+}
+
+impl ClientOptions {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// With certificate paths made absolute against `root`.
+    pub fn relative_to(&self, root: &Path) -> Self {
+        let mut options = self.clone();
+        for path in [&mut options.ca_certificate, &mut options.client_certificate]
+            .into_iter()
+            .flatten()
+        {
+            *path = root.join(&*path);
+        }
+        options
+    }
+}
+
+fn is_default_timeout(timeout: &Option<Duration>) -> bool {
+    *timeout == Some(DEFAULT_TIMEOUT)
+}
+
+fn is_default_max_redirects(max: &usize) -> bool {
+    *max == DEFAULT_MAX_REDIRECTS
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Whole seconds, 0 meaning no timeout.
+mod seconds {
+    use std::time::Duration;
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        timeout: &Option<Duration>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(timeout.map_or(0, |timeout| timeout.as_secs()))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Duration>, D::Error> {
+        let seconds = u64::deserialize(deserializer)?;
+        Ok((seconds > 0).then(|| Duration::from_secs(seconds)))
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ProxyMode {
+    /// From the `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` environment variables.
+    #[default]
+    System,
+    None,
+    Custom {
+        /// `http://`, `https://` or `socks5://`, with optional `user:password@`.
+        url: String,
+        /// Comma-separated hosts, domains or IP ranges reached directly.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        no_proxy: String,
+    },
+}
+
+impl ProxyMode {
+    pub fn is_system(&self) -> bool {
+        matches!(self, ProxyMode::System)
     }
 }
 
@@ -47,6 +148,10 @@ pub enum SendError {
     },
     #[error("OAuth2: {0}")]
     OAuth(String),
+    #[error("invalid proxy {url:?}: {message}")]
+    InvalidProxy { url: String, message: String },
+    #[error("invalid certificate {path}: {message}")]
+    InvalidCertificate { path: PathBuf, message: String },
     #[error("invalid GraphQL variables: {0}")]
     InvalidGraphqlVariables(String),
     #[error("request timed out")]
@@ -91,7 +196,7 @@ pub struct HttpClient {
     tokens: TokenStore,
 }
 
-fn builder(options: &ClientOptions) -> reqwest::ClientBuilder {
+fn builder(options: &ClientOptions) -> Result<reqwest::ClientBuilder, SendError> {
     let redirect = if options.follow_redirects {
         redirect::Policy::limited(options.max_redirects)
     } else {
@@ -103,13 +208,62 @@ fn builder(options: &ClientOptions) -> reqwest::ClientBuilder {
     if let Some(timeout) = options.timeout {
         builder = builder.timeout(timeout);
     }
-    builder
+    builder = match &options.proxy {
+        ProxyMode::System => builder,
+        ProxyMode::None => builder.no_proxy(),
+        ProxyMode::Custom { url, no_proxy } => {
+            let invalid = |error: reqwest::Error| SendError::InvalidProxy {
+                url: url.clone(),
+                message: error_chain(&error),
+            };
+            let proxy = reqwest::Proxy::all(url.trim())
+                .map_err(invalid)?
+                .no_proxy(reqwest::NoProxy::from_string(no_proxy));
+            builder.proxy(proxy)
+        }
+    };
+    if options.insecure {
+        builder = builder
+            .tls_danger_accept_invalid_certs(true)
+            .tls_danger_accept_invalid_hostnames(true);
+    }
+    if let Some(path) = &options.ca_certificate {
+        let certificates = reqwest::Certificate::from_pem_bundle(&read_pem(path)?)
+            .map_err(|error| invalid_certificate(path, &error))?;
+        if certificates.is_empty() {
+            return Err(SendError::InvalidCertificate {
+                path: path.clone(),
+                message: "no PEM certificate found".into(),
+            });
+        }
+        builder = builder.tls_certs_merge(certificates);
+    }
+    if let Some(path) = &options.client_certificate {
+        let identity = reqwest::Identity::from_pem(&read_pem(path)?)
+            .map_err(|error| invalid_certificate(path, &error))?;
+        builder = builder.identity(identity);
+    }
+    Ok(builder)
+}
+
+fn read_pem(path: &Path) -> Result<Vec<u8>, SendError> {
+    std::fs::read(path).map_err(|source| SendError::ReadFile {
+        path: path.to_owned(),
+        source,
+    })
+}
+
+fn invalid_certificate(path: &Path, error: &reqwest::Error) -> SendError {
+    SendError::InvalidCertificate {
+        path: path.to_owned(),
+        message: error_chain(error),
+    }
 }
 
 impl HttpClient {
     pub fn new(options: &ClientOptions) -> Result<Self, SendError> {
         Ok(Self {
-            client: builder(options).build()?,
+            client: builder(options)?.build()?,
             plain: None,
             tokens: TokenStore::default(),
         })
@@ -118,10 +272,10 @@ impl HttpClient {
     /// Cookies set by responses, redirects included, are stored in `jar` and sent back.
     pub fn with_cookies(options: &ClientOptions, jar: CookieJar) -> Result<Self, SendError> {
         Ok(Self {
-            client: builder(options)
+            client: builder(options)?
                 .cookie_provider(std::sync::Arc::new(jar))
                 .build()?,
-            plain: Some(builder(options).build()?),
+            plain: Some(builder(options)?.build()?),
             tokens: TokenStore::default(),
         })
     }

@@ -46,7 +46,7 @@ fn populate(workspace: &mut Workspace) {
             auth: Auth::Bearer {
                 token: "{{token}}".into(),
             },
-            order: Vec::new(),
+            ..Default::default()
         },
         items: vec![Item::Request(create), Item::Request(list)],
     };
@@ -491,4 +491,27 @@ fn duplicated_and_deleted_folders_update_their_secrets() {
     assert!(!secrets.contains("[folders.users]"), "{secrets}");
     let loaded = Workspace::load(dir.path()).unwrap();
     assert_eq!(loaded.tree, workspace.tree);
+}
+
+#[test]
+fn client_options_live_in_the_workspace_config() {
+    let (dir, mut workspace) = workspace();
+    let mut settings = workspace.tree.settings.clone();
+    settings.client = cornu_core::ClientOptions {
+        insecure: true,
+        ca_certificate: Some("certs/ca.pem".into()),
+        ..Default::default()
+    };
+    workspace
+        .update_folder(Path::new(""), settings.clone())
+        .unwrap();
+    let config = read(dir.path(), CONFIG_FILE);
+    assert!(
+        config.ends_with("[client]\ninsecure = true\nca_certificate = \"certs/ca.pem\"\n"),
+        "{config}"
+    );
+    assert_eq!(
+        Workspace::load(dir.path()).unwrap().tree.settings.client,
+        settings.client
+    );
 }
