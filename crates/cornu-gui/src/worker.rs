@@ -63,6 +63,13 @@ impl Worker {
         &self.tokens
     }
 
+    /// Later requests use `options`; on error the current client is kept.
+    pub fn configure(&mut self, options: &ClientOptions) -> Result<(), SendError> {
+        self.client = HttpClient::with_cookies(options, self.cookies.clone())?
+            .with_tokens(self.tokens.clone());
+        Ok(())
+    }
+
     pub fn send(&self, ctx: &egui::Context, doc: DocId, request: Request) -> AbortHandle {
         let client = self.client.clone();
         let tx = self.tx.clone();

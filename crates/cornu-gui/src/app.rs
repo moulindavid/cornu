@@ -3,12 +3,14 @@ use std::time::Instant;
 
 use cornu_core::runner::{RunPlan, Step};
 use cornu_core::{
-    Assertion, AssertionResult, Auth, Captured, Method, OAuth2, Request, capture, check, store,
+    Assertion, AssertionResult, Auth, Captured, ClientOptions, Method, OAuth2, Request, capture,
+    check, store,
 };
 use cornu_storage::{HistoryEntry, Outcome, moved_path};
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 use tokio::task::AbortHandle;
 
+use crate::client_settings::ClientSettingsWindow;
 use crate::cookies::CookiesWindow;
 use crate::editor::{self, EditorState};
 use crate::environments::Environments;
@@ -137,6 +139,7 @@ pub struct CornuApp {
     cookies_saved: u64,
     tokens_saved: u64,
     oauth: Option<Flow>,
+    client_settings: ClientSettingsWindow,
 }
 
 impl CornuApp {
@@ -161,6 +164,7 @@ impl CornuApp {
             cookies_saved: 0,
             tokens_saved: 0,
             oauth: None,
+            client_settings: ClientSettingsWindow::default(),
         };
         if let Some(root) = workspace {
             app.switch_workspace(Project::open(&root));
@@ -445,6 +449,14 @@ impl CornuApp {
         };
         self.project = project;
         self.load_local_state();
+        let options = self.project.workspace.tree.settings.client.clone();
+        if let Err(error) = self.configure_client(&options) {
+            self.notice = Some(Notice::error(format!(
+                "Client settings not applied: {error}"
+            )));
+            let _ = self.worker.configure(&ClientOptions::default());
+        }
+        self.client_settings = ClientSettingsWindow::default();
         self.environments.reset();
         self.tree = Tree::default();
     }
@@ -492,6 +504,26 @@ impl CornuApp {
                 self.notice = Some(Notice::error(format!("OAuth2 tokens not saved: {error}")));
             }
         }
+    }
+
+    /// Builds the client from `options`, with paths relative to the workspace.
+    fn configure_client(&mut self, options: &ClientOptions) -> Result<(), String> {
+        let resolved = match self.project.root() {
+            Some(root) => options.relative_to(root),
+            None => options.clone(),
+        };
+        self.worker
+            .configure(&resolved)
+            .map_err(|error| error.to_string())
+    }
+
+    fn apply_client_options(&mut self, options: ClientOptions) -> Result<(), String> {
+        self.configure_client(&options)?;
+        let mut settings = self.project.workspace.tree.settings.clone();
+        settings.client = options;
+        self.project
+            .save_folder(Path::new(""), settings)
+            .map_err(|error| error.to_string())
     }
 
     fn token_action(&mut self, ctx: &egui::Context, action: TokenAction, config: OAuth2) {
@@ -673,6 +705,10 @@ impl CornuApp {
                     }
                     if self.project.is_on_disk() && ui.button("Close workspace").clicked() {
                         self.close_workspace();
+                    }
+                    ui.separator();
+                    if ui.button("Client settings…").clicked() {
+                        self.client_settings.open();
                     }
                     ui.separator();
                     if ui.button("Import Postman collection…").clicked() {
@@ -1478,17 +1514,23 @@ impl eframe::App for CornuApp {
 
         egui::Panel::top("tabs").show(ui, |ui| {
             ui.horizontal(|ui| {
-                let selector_width = if self.project.captured.is_empty() {
+                let client = &self.project.workspace.tree.settings.client;
+                let mut selector_width = if self.project.captured.is_empty() {
                     300.0
                 } else {
                     370.0
                 };
+                if client.insecure {
+                    selector_width += 120.0;
+                }
                 let tabs_width = (ui.available_width() - selector_width).max(120.0);
                 let height = ui.spacing().interact_size.y;
                 ui.allocate_ui(egui::vec2(tabs_width, height), |ui| self.tab_bar(ui));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     self.environments.selector(ui, &self.project);
                     self.cookies.button(ui, self.worker.cookies());
+                    self.client_settings
+                        .warning(ui, &self.project.workspace.tree.settings.client);
                     captured_menu(ui, &mut self.project.captured);
                 });
             });
@@ -1509,6 +1551,14 @@ impl eframe::App for CornuApp {
         let on_disk = self.project.is_on_disk();
         self.cookies.show(ui.ctx(), self.worker.cookies(), on_disk);
         self.save_local_state();
+        let current = self.project.workspace.tree.settings.client.clone();
+        if let Some(options) = self
+            .client_settings
+            .show(ui.ctx(), &current, self.project.root())
+        {
+            let result = self.apply_client_options(options);
+            self.client_settings.applied(result);
+        }
         self.dialogs(ui.ctx());
         if let Some(discovered) = self.spec_import.show(ui.ctx(), &self.worker) {
             self.import_collection(ui.ctx(), Ok(discovered.collection));
@@ -1872,5 +1922,68 @@ mod tests {
             app.worker.tokens().is_empty(),
             "scratch starts without tokens"
         );
+    }
+
+    #[test]
+    fn client_options_are_applied_saved_and_restored() {
+        use wiremock::matchers::path;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let proxy = runtime.block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(path("/hello"))
+                .respond_with(ResponseTemplate::new(200).set_body_string("via proxy"))
+                .mount(&server)
+                .await;
+            server
+        });
+        let dir = tempfile::tempdir().unwrap();
+        cornu_storage::Workspace::init(dir.path(), "Demo").unwrap();
+        let ctx = egui::Context::default();
+        let get = |app: &CornuApp| {
+            app.worker
+                .run(&ctx, |client| async move {
+                    let request = Request::new(Method::Get, "http://api.example.invalid/hello");
+                    client.send(&request).await.map(|r| r.text().into_owned())
+                })
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap()
+        };
+        let options = ClientOptions {
+            proxy: cornu_core::ProxyMode::Custom {
+                url: proxy.uri(),
+                no_proxy: String::new(),
+            },
+            ..Default::default()
+        };
+
+        let mut app = CornuApp::new(Worker::new().unwrap(), Some(dir.path().to_owned()));
+        app.apply_client_options(options.clone()).unwrap();
+        assert_eq!(get(&app).unwrap(), "via proxy");
+        let config = std::fs::read_to_string(dir.path().join(cornu_storage::CONFIG_FILE)).unwrap();
+        assert!(config.contains("[client.proxy]"), "{config}");
+
+        let broken = ClientOptions {
+            ca_certificate: Some("missing.pem".into()),
+            ..Default::default()
+        };
+        let error = app.apply_client_options(broken).unwrap_err();
+        assert!(error.contains("missing.pem"), "{error}");
+        assert_eq!(app.project.workspace.tree.settings.client, options);
+        assert_eq!(
+            get(&app).unwrap(),
+            "via proxy",
+            "the working client is kept"
+        );
+
+        let mut app = CornuApp::new(Worker::new().unwrap(), Some(dir.path().to_owned()));
+        assert_eq!(
+            get(&app).unwrap(),
+            "via proxy",
+            "restored with the workspace"
+        );
+        app.close_workspace();
+        assert!(get(&app).is_err(), "scratch goes back to the defaults");
     }
 }
