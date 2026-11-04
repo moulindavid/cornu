@@ -18,6 +18,7 @@ csv = "1"
 cookie_store = { version = "0.22", default-features = false, features = ["serde_json"] }
 eframe = "0.37"
 fastrand = "2"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "crypto", "pem"] }
 rfd = "0.17"
 reqwest = { version = "0.13", features = ["gzip", "brotli", "deflate", "zstd", "multipart", "cookies", "socks"] }
@@ -31,6 +32,7 @@ tempfile = "3"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting", "macros"] }
 tokio = "1"
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }
 toml = "1"
 url = "2"
