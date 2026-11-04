@@ -3,6 +3,7 @@ mod edit;
 mod history;
 mod secrets;
 mod slug;
+mod tokens;
 
 use std::fs;
 use std::io;
@@ -17,6 +18,7 @@ pub use edit::moved_path;
 pub use history::{HISTORY_FILE, HISTORY_LIMIT, History, HistoryEntry, Outcome};
 use secrets::Secrets;
 pub use slug::slugify;
+pub use tokens::{TOKENS_FILE, load_tokens, save_tokens, tokens_path};
 
 pub const CONFIG_FILE: &str = "cornu.toml";
 pub const FOLDER_FILE: &str = "_folder.toml";
@@ -40,6 +42,8 @@ pub enum StorageError {
     },
     #[error("{}: {message}", path.display())]
     Cookies { path: PathBuf, message: String },
+    #[error("{}: {message}", path.display())]
+    Tokens { path: PathBuf, message: String },
     #[error("{} is not a cornu workspace (no {CONFIG_FILE})", .0.display())]
     NotAWorkspace(PathBuf),
 }
@@ -392,7 +396,7 @@ fn ensure_gitignore(root: &Path) -> Result<(), StorageError> {
     if !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
     }
-    content.push_str("# cornu local state: history, secrets and cookies\n.cornu/\n");
+    content.push_str("# cornu local state: history, secrets, cookies and tokens\n.cornu/\n");
     write_file(&path, content.as_bytes())
 }
 

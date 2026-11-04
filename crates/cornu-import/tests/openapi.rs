@@ -1,4 +1,6 @@
-use cornu_core::{ApiKeyLocation, Auth, Body, KeyValue, Method, MultipartPart, Request};
+use cornu_core::{
+    ApiKeyLocation, Auth, Body, Grant, KeyValue, Method, MultipartPart, OAuth2, Request,
+};
 use cornu_import::openapi::parse_spec;
 use cornu_import::{Collection, ImportError, ImportedFolder, ImportedItem};
 use cornu_storage::Workspace;
@@ -299,4 +301,60 @@ fn imported_spec_is_written_to_a_workspace() {
         .find_request(&path.join("pet/add-a-new-pet-to-the-store.req.toml"))
         .unwrap();
     assert_eq!(saved.request.name, "Add a new pet to the store");
+}
+
+#[test]
+fn oauth2_flows_become_oauth2_auth() {
+    let spec = json!({
+        "openapi": "3.0.3",
+        "info": {"title": "T"},
+        "servers": [{"url": "https://x.example"}],
+        "security": [{"oauth": ["read", "write"]}],
+        "components": {"securitySchemes": {"oauth": {"type": "oauth2", "flows": {
+            "authorizationCode": {
+                "authorizationUrl": "https://auth.example/authorize",
+                "tokenUrl": "https://auth.example/token",
+                "scopes": {"read": "", "write": ""}
+            }
+        }}}},
+        "paths": {"/a": {"get": {}}}
+    });
+    let collection = parse_spec(&spec.to_string(), None).unwrap();
+    assert_eq!(
+        collection.root.auth,
+        Auth::OAuth2(OAuth2 {
+            grant: Grant::AuthorizationCode,
+            auth_url: "https://auth.example/authorize".into(),
+            token_url: "https://auth.example/token".into(),
+            client_id: "{{client_id}}".into(),
+            client_secret: "{{client_secret}}".into(),
+            scope: "read write".into(),
+            ..Default::default()
+        })
+    );
+    let secret = collection
+        .root
+        .variables
+        .iter()
+        .find(|variable| variable.key == "client_secret")
+        .unwrap();
+    assert!(secret.secret);
+    assert!(collection.warnings.is_empty(), "{:?}", collection.warnings);
+
+    let swagger = json!({
+        "swagger": "2.0",
+        "info": {"title": "T"},
+        "host": "x.example",
+        "security": [{"app": []}],
+        "securityDefinitions": {"app": {"type": "oauth2", "flow": "application",
+            "tokenUrl": "https://auth.example/token"}},
+        "paths": {"/a": {"get": {}}}
+    });
+    let collection = parse_spec(&swagger.to_string(), None).unwrap();
+    let Auth::OAuth2(config) = &collection.root.auth else {
+        panic!("expected oauth2");
+    };
+    assert_eq!(config.grant, Grant::ClientCredentials);
+    assert_eq!(config.token_url, "https://auth.example/token");
+    assert_eq!(config.scope, "");
 }

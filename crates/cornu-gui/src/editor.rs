@@ -1,11 +1,13 @@
 use std::path::PathBuf;
 
 use cornu_core::{
-    ApiKeyLocation, AssertSource, Assertion, Auth, Body, Capture, CaptureSource, KeyValue, Method,
-    MultipartPart, Operator, PartValue, Request,
+    ApiKeyLocation, AssertSource, Assertion, Auth, Body, Capture, CaptureSource, ClientAuth,
+    DEFAULT_REDIRECT_URI, Grant, KeyValue, Method, MultipartPart, OAuth2, Operator, PartValue,
+    Request,
 };
 use eframe::egui;
 
+use crate::oauth::TokenPanel;
 use crate::query_editor::{CompletionPopup, query_editor};
 use crate::schema::SchemaPanel;
 use crate::widgets::{column_widths, count_label, key_value_table};
@@ -36,6 +38,7 @@ pub struct EditorState {
     json_error: Option<String>,
     pub schema: SchemaPanel,
     completion: CompletionPopup,
+    pub token: TokenPanel,
 }
 
 pub fn request_editor(
@@ -88,7 +91,7 @@ pub fn request_editor(
                     request.method = Method::Post;
                 }
             }
-            Tab::Auth => auth_editor(ui, &mut request.auth),
+            Tab::Auth => auth_editor(ui, &mut request.auth, &mut state.token),
             Tab::Captures => capture_table(ui, id.with("captures"), &mut request.captures),
             Tab::Tests => assertion_table(ui, id.with("tests"), &mut request.assertions),
         });
@@ -520,15 +523,17 @@ enum AuthKind {
     Bearer,
     Basic,
     ApiKey,
+    OAuth2,
 }
 
 impl AuthKind {
-    const ALL: [AuthKind; 5] = [
+    const ALL: [AuthKind; 6] = [
         AuthKind::Inherit,
         AuthKind::None,
         AuthKind::Bearer,
         AuthKind::Basic,
         AuthKind::ApiKey,
+        AuthKind::OAuth2,
     ];
 
     fn label(self) -> &'static str {
@@ -538,6 +543,7 @@ impl AuthKind {
             AuthKind::Bearer => "Bearer token",
             AuthKind::Basic => "Basic",
             AuthKind::ApiKey => "API key",
+            AuthKind::OAuth2 => "OAuth 2.0",
         }
     }
 
@@ -557,6 +563,10 @@ impl AuthKind {
                 value: String::new(),
                 location: ApiKeyLocation::Header,
             },
+            AuthKind::OAuth2 => Auth::OAuth2(OAuth2 {
+                client_secret: "{{client_secret}}".into(),
+                ..Default::default()
+            }),
         }
     }
 }
@@ -568,10 +578,11 @@ fn auth_kind(auth: &Auth) -> AuthKind {
         Auth::Bearer { .. } => AuthKind::Bearer,
         Auth::Basic { .. } => AuthKind::Basic,
         Auth::ApiKey { .. } => AuthKind::ApiKey,
+        Auth::OAuth2(_) => AuthKind::OAuth2,
     }
 }
 
-pub fn auth_editor(ui: &mut egui::Ui, auth: &mut Auth) {
+pub fn auth_editor(ui: &mut egui::Ui, auth: &mut Auth, token: &mut TokenPanel) {
     let current = auth_kind(auth);
     egui::ComboBox::from_label("Type")
         .selected_text(current.label())
@@ -617,7 +628,71 @@ pub fn auth_editor(ui: &mut egui::Ui, auth: &mut Auth) {
                 });
                 ui.end_row();
             }
+            Auth::OAuth2(config) => oauth2_fields(ui, config),
         });
+    token.show(ui);
+}
+
+fn oauth2_fields(ui: &mut egui::Ui, config: &mut OAuth2) {
+    ui.label("Grant");
+    egui::ComboBox::from_id_salt("oauth2-grant")
+        .selected_text(config.grant.label())
+        .show_ui(ui, |ui| {
+            for grant in Grant::ALL {
+                ui.selectable_value(&mut config.grant, grant, grant.label());
+            }
+        });
+    ui.end_row();
+    let code = config.grant == Grant::AuthorizationCode;
+    if code {
+        field(
+            ui,
+            "Authorization URL",
+            &mut config.auth_url,
+            "https://auth.example.com/authorize",
+            false,
+        );
+    }
+    field(
+        ui,
+        "Token URL",
+        &mut config.token_url,
+        "https://auth.example.com/oauth/token",
+        false,
+    );
+    field(
+        ui,
+        "Client ID",
+        &mut config.client_id,
+        "{{client_id}}",
+        false,
+    );
+    let hint = if code {
+        "empty for a public client"
+    } else {
+        "{{client_secret}}"
+    };
+    field(ui, "Client secret", &mut config.client_secret, hint, true);
+    field(ui, "Scope", &mut config.scope, "read write", false);
+    if code {
+        field(
+            ui,
+            "Redirect URI",
+            &mut config.redirect_uri,
+            DEFAULT_REDIRECT_URI,
+            false,
+        );
+    }
+    ui.label("Send credentials");
+    ui.horizontal(|ui| {
+        ui.radio_value(
+            &mut config.client_auth,
+            ClientAuth::Header,
+            "Basic auth header",
+        );
+        ui.radio_value(&mut config.client_auth, ClientAuth::Body, "In the body");
+    });
+    ui.end_row();
 }
 
 fn field(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str, password: bool) {
@@ -798,6 +873,50 @@ mod tests {
         let text = format!("{:?}", output.shapes);
         for expected in ["Tests (2)", "$.name", "contains", "Ada", "Add test"] {
             assert!(text.contains(expected), "{expected} in {text}");
+        }
+    }
+
+    #[test]
+    fn oauth2_fields_follow_the_grant() {
+        let render = |grant: Grant| {
+            let mut request = Request::new(Method::Get, "/").with_auth(Auth::OAuth2(OAuth2 {
+                grant,
+                ..Default::default()
+            }));
+            let mut state = EditorState {
+                tab: Tab::Auth,
+                ..Default::default()
+            };
+            let ctx = egui::Context::default();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                request_editor(ui, egui::Id::unique("editor"), &mut request, &mut state);
+            });
+            output.textures_delta.clear();
+            format!("{:?}", output.shapes)
+        };
+        let credentials = render(Grant::ClientCredentials);
+        for expected in [
+            "Auth (OAuth 2.0)",
+            "Token URL",
+            "Client secret",
+            "Basic auth header",
+        ] {
+            assert!(
+                credentials.contains(expected),
+                "{expected} in {credentials}"
+            );
+        }
+        assert!(!credentials.contains("Redirect URI"));
+        let code = render(Grant::AuthorizationCode);
+        for expected in ["Authorization URL", "Redirect URI", "PKCE"] {
+            assert!(code.contains(expected), "{expected} in {code}");
         }
     }
 }

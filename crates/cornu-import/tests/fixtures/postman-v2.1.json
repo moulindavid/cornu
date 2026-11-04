@@ -127,7 +127,17 @@
       "name": "Countries (GraphQL)",
       "request": {
         "method": "POST",
-        "auth": { "type": "oauth2", "oauth2": [{ "key": "grant_type", "value": "client_credentials" }] },
+        "auth": {
+          "type": "oauth2",
+          "oauth2": [
+            { "key": "grant_type", "value": "client_credentials" },
+            { "key": "accessTokenUrl", "value": "https://auth.example.com/oauth/token" },
+            { "key": "clientId", "value": "{{client_id}}" },
+            { "key": "clientSecret", "value": "{{client_secret}}" },
+            { "key": "scope", "value": "read write" },
+            { "key": "client_authentication", "value": "body" }
+          ]
+        },
         "body": {
           "mode": "graphql",
           "graphql": {

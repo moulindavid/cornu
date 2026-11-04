@@ -1,6 +1,8 @@
 //! OpenAPI 3.0 / 3.1 and Swagger 2.0 specs, in JSON or YAML.
 
-use cornu_core::{ApiKeyLocation, Auth, Body, KeyValue, Method, MultipartPart, Request};
+use cornu_core::{
+    ApiKeyLocation, Auth, Body, Grant, KeyValue, Method, MultipartPart, OAuth2, Request,
+};
 use serde_json::{Map, Value, json};
 
 use crate::{Collection, ImportError, ImportedFolder, ImportedItem};
@@ -644,7 +646,7 @@ impl<'a> Importer<'a> {
     fn security(&mut self, requirements: Option<&'a Value>) -> Option<Auth> {
         let requirements = requirements?.as_array()?;
         // `[{}]` or `[]` both mean no auth is required.
-        let Some((name, _)) = requirements
+        let Some((name, scopes)) = requirements
             .iter()
             .filter_map(Value::as_object)
             .find_map(|requirement| requirement.iter().next())
@@ -662,10 +664,16 @@ impl<'a> Importer<'a> {
             self.warn(format!("security scheme {name:?} is not defined"));
             return Some(Auth::None);
         };
-        Some(self.scheme_auth(name, scheme))
+        let scopes: Vec<&str> = scopes
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        Some(self.scheme_auth(name, scheme, &scopes.join(" ")))
     }
 
-    fn scheme_auth(&mut self, name: &str, scheme: &Value) -> Auth {
+    fn scheme_auth(&mut self, name: &str, scheme: &Value, scope: &str) -> Auth {
         let kind = scheme
             .get("type")
             .and_then(Value::as_str)
@@ -703,6 +711,11 @@ impl<'a> Importer<'a> {
                     location,
                 }
             }
+            ("oauth2", _) if let Some(config) = oauth2(scheme, scope) => {
+                self.variable("client_id", false);
+                self.variable("client_secret", true);
+                Auth::OAuth2(config)
+            }
             ("oauth2" | "openIdConnect", _) => {
                 self.warn(format!(
                     "{name:?} uses {kind}: cornu cannot run the flow yet, paste an access token into the token variable"
@@ -738,6 +751,36 @@ impl<'a> Importer<'a> {
             self.warnings.push(warning);
         }
     }
+}
+
+/// Client credentials or authorization code, from a v3 `flows` object or a v2 `flow`; the other
+/// flows are deprecated by OAuth 2.1.
+fn oauth2(scheme: &Value, scope: &str) -> Option<OAuth2> {
+    let url = |flow: &Value, key: &str| text_of(flow.get(key)).unwrap_or_default();
+    let (grant, flow) = match scheme.get("flows") {
+        Some(flows) => match (
+            flows.get("clientCredentials"),
+            flows.get("authorizationCode"),
+        ) {
+            (Some(flow), _) => (Grant::ClientCredentials, flow),
+            (None, Some(flow)) => (Grant::AuthorizationCode, flow),
+            _ => return None,
+        },
+        None => match scheme.get("flow").and_then(Value::as_str)? {
+            "application" => (Grant::ClientCredentials, scheme),
+            "accessCode" => (Grant::AuthorizationCode, scheme),
+            _ => return None,
+        },
+    };
+    Some(OAuth2 {
+        grant,
+        auth_url: url(flow, "authorizationUrl"),
+        token_url: url(flow, "tokenUrl"),
+        client_id: "{{client_id}}".into(),
+        client_secret: "{{client_secret}}".into(),
+        scope: scope.to_owned(),
+        ..Default::default()
+    })
 }
 
 /// OpenAPI 3.1 allows `type: [string, "null"]`.

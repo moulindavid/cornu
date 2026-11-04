@@ -1,7 +1,8 @@
 //! Postman collection format v2.0 / v2.1: <https://schema.postman.com/collection/json/v2.1.0/draft-07/docs/index.html>
 
 use cornu_core::{
-    ApiKeyLocation, Auth, Body, Environment, KeyValue, Method, MultipartPart, Request,
+    ApiKeyLocation, Auth, Body, ClientAuth, Environment, Grant, KeyValue, Method, MultipartPart,
+    OAuth2, Request,
 };
 use serde_json::{Map, Value};
 
@@ -214,6 +215,34 @@ impl Importer {
                     ApiKeyLocation::Header
                 },
             },
+            "oauth2" => {
+                let grant = match param("grant_type").as_str() {
+                    "client_credentials" => Grant::ClientCredentials,
+                    "" | "authorization_code" | "authorization_code_with_pkce" => {
+                        Grant::AuthorizationCode
+                    }
+                    other => {
+                        self.warnings.push(format!(
+                            "{location}: the OAuth2 {other} grant is not supported, imported as no auth"
+                        ));
+                        return Auth::None;
+                    }
+                };
+                Auth::OAuth2(OAuth2 {
+                    grant,
+                    auth_url: param("authUrl"),
+                    token_url: param("accessTokenUrl"),
+                    client_id: param("clientId"),
+                    client_secret: param("clientSecret"),
+                    scope: param("scope"),
+                    redirect_uri: param("redirect_uri"),
+                    client_auth: if param("client_authentication") == "body" {
+                        ClientAuth::Body
+                    } else {
+                        ClientAuth::Header
+                    },
+                })
+            }
             other => {
                 self.warnings.push(format!(
                     "{}: {other} auth is not supported yet, imported as no auth",

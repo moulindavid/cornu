@@ -3,6 +3,7 @@ use std::path::Path;
 use eframe::egui;
 
 use crate::editor::auth_editor;
+use crate::oauth::TokenPanel;
 use crate::project::Project;
 use crate::widgets::{count_label, variable_table};
 
@@ -19,6 +20,7 @@ pub fn folder_view(
     project: &mut Project,
     path: &Path,
     tab: &mut FolderTab,
+    token: &mut TokenPanel,
 ) -> Option<String> {
     let Some(folder) = project.workspace.folder(path) else {
         ui.weak("This folder no longer exists.");
@@ -49,7 +51,7 @@ pub fn folder_view(
     egui::ScrollArea::vertical()
         .id_salt(id)
         .show(ui, |ui| match tab {
-            FolderTab::Auth => auth_editor(ui, &mut settings.auth),
+            FolderTab::Auth => auth_editor(ui, &mut settings.auth, token),
             FolderTab::Variables => variable_table(ui, id, &mut settings.variables),
         });
 
