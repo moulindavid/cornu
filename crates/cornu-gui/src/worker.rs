@@ -1,7 +1,7 @@
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use cornu_core::runner::{CancelToken, RunPlan, RunSummary, StepResult};
-use cornu_core::{ClientOptions, HttpClient, Request, Response, SendError};
+use cornu_core::{ClientOptions, CookieJar, HttpClient, Request, Response, SendError};
 use eframe::egui;
 use tokio::runtime::Runtime;
 use tokio::task::AbortHandle;
@@ -27,6 +27,7 @@ pub struct RunHandle {
 pub struct Worker {
     runtime: Runtime,
     client: HttpClient,
+    cookies: CookieJar,
     tx: Sender<Completed>,
     rx: Receiver<Completed>,
 }
@@ -38,14 +39,20 @@ impl Worker {
             .thread_name("cornu-worker")
             .enable_all()
             .build()?;
-        let client = HttpClient::new(&ClientOptions::default())?;
+        let cookies = CookieJar::default();
+        let client = HttpClient::with_cookies(&ClientOptions::default(), cookies.clone())?;
         let (tx, rx) = channel();
         Ok(Self {
             runtime,
             client,
+            cookies,
             tx,
             rx,
         })
+    }
+
+    pub fn cookies(&self) -> &CookieJar {
+        &self.cookies
     }
 
     pub fn send(&self, ctx: &egui::Context, doc: DocId, request: Request) -> AbortHandle {

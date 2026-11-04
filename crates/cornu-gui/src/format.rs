@@ -34,6 +34,16 @@ pub fn ago(seconds: i64) -> String {
     }
 }
 
+/// How long until something expires, `seconds` from now.
+pub fn until(seconds: i64) -> String {
+    match seconds {
+        ..60 => "in a minute".into(),
+        60..3600 => format!("in {} min", seconds / 60),
+        3600..86_400 => format!("in {} h", seconds / 3600),
+        _ => format!("in {} days", seconds / 86_400),
+    }
+}
+
 pub fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -75,6 +85,14 @@ mod tests {
         assert_eq!(ago(7200), "2 h ago");
         assert_eq!(ago(90_000), "yesterday");
         assert_eq!(ago(3 * 86_400), "3 days ago");
+    }
+
+    #[test]
+    fn expiries_are_relative() {
+        assert_eq!(until(5), "in a minute");
+        assert_eq!(until(600), "in 10 min");
+        assert_eq!(until(7200), "in 2 h");
+        assert_eq!(until(3 * 86_400), "in 3 days");
     }
 
     #[test]
