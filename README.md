@@ -16,6 +16,7 @@ and plain text files you can commit to git.
 - Data-driven runs: replace a variable by a list of values or a CSV file (with or without header)
 - Request chaining: capture response values (JSONPath, headers, status) into variables
 - Response tests: assert on status, headers, JSONPath values, time and size
+- Cookie jar per workspace, kept outside git, with a viewer to inspect and delete cookies
 - Native desktop GUI built with [egui](https://github.com/emilk/egui)
 
 ## Building

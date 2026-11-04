@@ -1,4 +1,5 @@
 mod app;
+mod cookies;
 mod editor;
 mod environments;
 mod folder;

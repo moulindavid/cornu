@@ -2,6 +2,7 @@ mod assertion;
 mod auth;
 mod body;
 mod capture;
+mod cookies;
 mod environment;
 pub mod graphql;
 mod http;
@@ -16,6 +17,7 @@ pub use assertion::{AssertSource, Assertion, AssertionResult, Operator, check, p
 pub use auth::{ApiKeyLocation, Auth};
 pub use body::{Body, MultipartPart, PartValue};
 pub use capture::{Capture, CaptureError, CaptureSource, Captured, capture, store};
+pub use cookies::{CookieFileError, CookieInfo, CookieJar};
 pub use environment::Environment;
 pub use http::{ClientOptions, HttpClient, SendError};
 pub use key_value::KeyValue;

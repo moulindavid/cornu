@@ -7,6 +7,7 @@ use cornu_storage::{HistoryEntry, Outcome, moved_path};
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 use tokio::task::AbortHandle;
 
+use crate::cookies::CookiesWindow;
 use crate::editor::{self, EditorState};
 use crate::environments::Environments;
 use crate::folder::{FolderTab, folder_view};
@@ -128,6 +129,9 @@ pub struct CornuApp {
     closing: Option<DocId>,
     deleting: Option<PathBuf>,
     spec_import: SpecImport,
+    cookies: CookiesWindow,
+    /// The jar revision last written to disk.
+    cookies_saved: u64,
 }
 
 impl CornuApp {
@@ -148,6 +152,8 @@ impl CornuApp {
             closing: None,
             deleting: None,
             spec_import: SpecImport::default(),
+            cookies: CookiesWindow::default(),
+            cookies_saved: 0,
         };
         if let Some(root) = workspace {
             app.switch_workspace(Project::open(&root));
@@ -431,8 +437,38 @@ impl CornuApp {
             }),
         };
         self.project = project;
+        self.load_cookies();
         self.environments.reset();
         self.tree = Tree::default();
+    }
+
+    fn load_cookies(&mut self) {
+        let jar = self.worker.cookies();
+        let loaded = match self.project.root() {
+            Some(root) => cornu_storage::load_cookies(root, jar),
+            None => {
+                jar.clear();
+                Ok(())
+            }
+        };
+        if let Err(error) = loaded {
+            jar.clear();
+            self.notice = Some(Notice::error(format!("Cookies not loaded: {error}")));
+        }
+        self.cookies_saved = jar.revision();
+    }
+
+    fn save_cookies(&mut self) {
+        let jar = self.worker.cookies();
+        if jar.revision() == self.cookies_saved {
+            return;
+        }
+        self.cookies_saved = jar.revision();
+        if let Some(root) = self.project.root()
+            && let Err(error) = cornu_storage::save_cookies(root, jar)
+        {
+            self.notice = Some(Notice::error(format!("Cookies not saved: {error}")));
+        }
     }
 
     fn apply(&mut self, ctx: &egui::Context, action: TreeAction) {
@@ -1359,15 +1395,16 @@ impl eframe::App for CornuApp {
         egui::Panel::top("tabs").show(ui, |ui| {
             ui.horizontal(|ui| {
                 let selector_width = if self.project.captured.is_empty() {
-                    240.0
+                    300.0
                 } else {
-                    310.0
+                    370.0
                 };
                 let tabs_width = (ui.available_width() - selector_width).max(120.0);
                 let height = ui.spacing().interact_size.y;
                 ui.allocate_ui(egui::vec2(tabs_width, height), |ui| self.tab_bar(ui));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     self.environments.selector(ui, &self.project);
+                    self.cookies.button(ui, self.worker.cookies());
                     captured_menu(ui, &mut self.project.captured);
                 });
             });
@@ -1385,6 +1422,9 @@ impl eframe::App for CornuApp {
         if let Some(error) = self.environments.manager(ui.ctx(), &mut self.project) {
             self.notice = Some(Notice::error(error));
         }
+        let on_disk = self.project.is_on_disk();
+        self.cookies.show(ui.ctx(), self.worker.cookies(), on_disk);
+        self.save_cookies();
         self.dialogs(ui.ctx());
         if let Some(discovered) = self.spec_import.show(ui.ctx(), &self.worker) {
             self.import_collection(ui.ctx(), Ok(discovered.collection));
@@ -1618,5 +1658,55 @@ mod tests {
         assert!(shapes.contains("Could not capture session"), "{shapes}");
         assert!(shapes.contains("Tests: 1/2 passed"), "{shapes}");
         assert!(shapes.contains("got fresh"), "{shapes}");
+    }
+
+    #[test]
+    fn workspace_cookies_are_saved_and_restored() {
+        use wiremock::matchers::{header, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let server = runtime.block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(path("/login"))
+                .respond_with(ResponseTemplate::new(204).insert_header("Set-Cookie", "sid=42"))
+                .mount(&server)
+                .await;
+            Mock::given(path("/me"))
+                .and(header("cookie", "sid=42"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&server)
+                .await;
+            server
+        });
+        let dir = tempfile::tempdir().unwrap();
+        cornu_storage::Workspace::init(dir.path(), "Demo").unwrap();
+        let ctx = egui::Context::default();
+        let send = |app: &CornuApp, url: String| {
+            let rx = app.worker.run(&ctx, move |client| async move {
+                client
+                    .send(&Request::new(Method::Get, url))
+                    .await
+                    .unwrap()
+                    .status
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap()
+        };
+
+        let mut app = CornuApp::new(Worker::new().unwrap(), Some(dir.path().to_owned()));
+        assert_eq!(send(&app, format!("{}/login", server.uri())), 204);
+        app.save_cookies();
+        assert!(cornu_storage::cookies_path(dir.path()).exists());
+
+        let app = CornuApp::new(Worker::new().unwrap(), Some(dir.path().to_owned()));
+        assert_eq!(app.worker.cookies().list()[0].name, "sid");
+        assert_eq!(send(&app, format!("{}/me", server.uri())), 200);
+
+        let mut app = app;
+        app.close_workspace();
+        assert!(
+            app.worker.cookies().list().is_empty(),
+            "scratch starts empty"
+        );
     }
 }

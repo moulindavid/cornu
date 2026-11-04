@@ -6,7 +6,7 @@ use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{multipart, redirect};
 use url::Url;
 
-use crate::{Body, PartValue, Request, Response, key_value};
+use crate::{Body, CookieJar, PartValue, Request, Response, key_value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientOptions {
@@ -81,23 +81,41 @@ fn error_chain(error: &reqwest::Error) -> String {
 #[derive(Debug, Clone)]
 pub struct HttpClient {
     client: reqwest::Client,
+    /// Without the cookie jar, for requests that set their own `Cookie` header: reqwest would
+    /// replace it with the jar's.
+    plain: Option<reqwest::Client>,
+}
+
+fn builder(options: &ClientOptions) -> reqwest::ClientBuilder {
+    let redirect = if options.follow_redirects {
+        redirect::Policy::limited(options.max_redirects)
+    } else {
+        redirect::Policy::none()
+    };
+    let mut builder = reqwest::Client::builder()
+        .redirect(redirect)
+        .user_agent(concat!("cornu/", env!("CARGO_PKG_VERSION")));
+    if let Some(timeout) = options.timeout {
+        builder = builder.timeout(timeout);
+    }
+    builder
 }
 
 impl HttpClient {
     pub fn new(options: &ClientOptions) -> Result<Self, SendError> {
-        let redirect = if options.follow_redirects {
-            redirect::Policy::limited(options.max_redirects)
-        } else {
-            redirect::Policy::none()
-        };
-        let mut builder = reqwest::Client::builder()
-            .redirect(redirect)
-            .user_agent(concat!("cornu/", env!("CARGO_PKG_VERSION")));
-        if let Some(timeout) = options.timeout {
-            builder = builder.timeout(timeout);
-        }
         Ok(Self {
-            client: builder.build()?,
+            client: builder(options).build()?,
+            plain: None,
+        })
+    }
+
+    /// Cookies set by responses, redirects included, are stored in `jar` and sent back.
+    pub fn with_cookies(options: &ClientOptions, jar: CookieJar) -> Result<Self, SendError> {
+        Ok(Self {
+            client: builder(options)
+                .cookie_provider(std::sync::Arc::new(jar))
+                .build()?,
+            plain: Some(builder(options).build()?),
         })
     }
 
@@ -116,7 +134,11 @@ impl HttpClient {
             headers.insert(CONTENT_TYPE, value);
         }
 
-        let mut builder = self.client.request(method, url).headers(headers);
+        let client = match &self.plain {
+            Some(plain) if request.has_header("cookie") => plain,
+            _ => &self.client,
+        };
+        let mut builder = client.request(method, url).headers(headers);
         builder = match &request.body {
             Body::None => builder,
             Body::Raw { text, .. } | Body::Json { text } => builder.body(text.clone()),

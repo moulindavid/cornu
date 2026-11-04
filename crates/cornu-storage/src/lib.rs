@@ -1,3 +1,4 @@
+mod cookies;
 mod edit;
 mod history;
 mod secrets;
@@ -11,6 +12,7 @@ use cornu_core::{Auth, Environment, KeyValue, Request, Variables};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+pub use cookies::{COOKIES_FILE, cookies_path, load_cookies, save_cookies};
 pub use edit::moved_path;
 pub use history::{HISTORY_FILE, HISTORY_LIMIT, History, HistoryEntry, Outcome};
 use secrets::Secrets;
@@ -36,6 +38,8 @@ pub enum StorageError {
         path: PathBuf,
         source: toml::ser::Error,
     },
+    #[error("{}: {message}", path.display())]
+    Cookies { path: PathBuf, message: String },
     #[error("{} is not a cornu workspace (no {CONFIG_FILE})", .0.display())]
     NotAWorkspace(PathBuf),
 }
@@ -388,7 +392,7 @@ fn ensure_gitignore(root: &Path) -> Result<(), StorageError> {
     if !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
     }
-    content.push_str("# cornu local state: history and secrets\n.cornu/\n");
+    content.push_str("# cornu local state: history, secrets and cookies\n.cornu/\n");
     write_file(&path, content.as_bytes())
 }
 
