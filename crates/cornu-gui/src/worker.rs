@@ -1,7 +1,10 @@
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use cornu_core::runner::{CancelToken, RunPlan, RunSummary, StepResult};
-use cornu_core::{ClientOptions, CookieJar, HttpClient, Request, Response, SendError, TokenStore};
+use cornu_core::{
+    ClientOptions, CookieJar, HttpClient, Request, Response, SendError, SseEvent, Streamed,
+    TokenStore,
+};
 use eframe::egui;
 use tokio::runtime::Runtime;
 use tokio::task::AbortHandle;
@@ -10,9 +13,23 @@ use crate::websocket::{SocketHandle, SocketUpdate};
 
 pub type DocId = u64;
 
-pub struct Completed {
+pub struct Update {
     pub doc: DocId,
-    pub result: Result<Response, SendError>,
+    pub progress: Progress,
+}
+
+pub enum Progress {
+    /// The response is an event stream, whose events follow.
+    Streaming(Response),
+    Event(SseEvent),
+    /// Always the last update of a request.
+    Done(Result<Response, SendError>),
+}
+
+pub struct SendHandle {
+    pub abort: AbortHandle,
+    /// Sending to it, or dropping it, ends an event stream and keeps what was received.
+    pub stop: tokio::sync::oneshot::Sender<()>,
 }
 
 pub enum RunEvent {
@@ -31,8 +48,8 @@ pub struct Worker {
     client: HttpClient,
     cookies: CookieJar,
     tokens: TokenStore,
-    tx: Sender<Completed>,
-    rx: Receiver<Completed>,
+    tx: Sender<Update>,
+    rx: Receiver<Update>,
 }
 
 impl Worker {
@@ -72,17 +89,33 @@ impl Worker {
         Ok(())
     }
 
-    pub fn send(&self, ctx: &egui::Context, doc: DocId, request: Request) -> AbortHandle {
+    pub fn send(&self, ctx: &egui::Context, doc: DocId, request: Request) -> SendHandle {
         let client = self.client.clone();
         let tx = self.tx.clone();
         let ctx = ctx.clone();
-        self.runtime
-            .spawn(async move {
-                let result = client.send(&request).await;
-                let _ = tx.send(Completed { doc, result });
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let task = self.runtime.spawn(async move {
+            let stopped = async {
+                let _ = stopped.await;
+            };
+            let report = |progress| {
+                let _ = tx.send(Update { doc, progress });
                 ctx.request_repaint();
-            })
-            .abort_handle()
+            };
+            let result = client
+                .send_streaming(&request, stopped, |update| {
+                    report(match update {
+                        Streamed::Head(head) => Progress::Streaming(head),
+                        Streamed::Event(event) => Progress::Event(event),
+                    })
+                })
+                .await;
+            report(Progress::Done(result));
+        });
+        SendHandle {
+            abort: task.abort_handle(),
+            stop,
+        }
     }
 
     /// For background jobs that do not belong to a request tab.
@@ -168,7 +201,7 @@ impl Worker {
         RunHandle { events, cancel }
     }
 
-    pub fn completed(&self) -> impl Iterator<Item = Completed> + '_ {
+    pub fn updates(&self) -> impl Iterator<Item = Update> + '_ {
         self.rx.try_iter()
     }
 }

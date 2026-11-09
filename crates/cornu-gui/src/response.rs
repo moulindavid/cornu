@@ -3,6 +3,7 @@ use std::sync::Arc;
 use cornu_core::Response;
 use eframe::egui::{self, Color32, FontId, Galley, RichText};
 
+use crate::events::EventLog;
 use crate::format;
 use crate::highlight::{self, Kind, Palette};
 
@@ -10,6 +11,7 @@ const HIGHLIGHT_LIMIT: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
+    Events,
     Body,
     Headers,
 }
@@ -43,12 +45,13 @@ pub struct ResponseView {
     mode: Mode,
     search: String,
     rendered: Option<Rendered>,
+    events: Option<EventLog>,
 }
 
 impl ResponseView {
     pub fn new(response: Response) -> Self {
         let raw = String::from_utf8(response.body.clone()).ok();
-        let pretty = raw.as_deref().and_then(pretty_json);
+        let pretty = raw.as_deref().and_then(format::pretty_json);
         let tokens = match &pretty {
             Some(pretty) if pretty.len() <= HIGHLIGHT_LIMIT => highlight::json_tokens(pretty),
             _ => Vec::new(),
@@ -67,7 +70,15 @@ impl ResponseView {
             mode,
             search: String::new(),
             rendered: None,
+            events: None,
         }
+    }
+
+    /// For an event stream, whose body is shown event by event first.
+    pub fn with_events(mut self, events: EventLog) -> Self {
+        self.tab = Tab::Events;
+        self.events = Some(events);
+        self
     }
 
     fn body_text(&self) -> Option<&str> {
@@ -91,12 +102,21 @@ impl ResponseView {
             ui.separator();
             ui.label(format::size(response.size()));
             ui.separator();
+            if let Some(events) = &self.events {
+                let label = format!("Events ({})", events.len());
+                ui.selectable_value(&mut self.tab, Tab::Events, label);
+            }
             ui.selectable_value(&mut self.tab, Tab::Body, "Body");
             let headers = format!("Headers ({})", response.headers.len());
             ui.selectable_value(&mut self.tab, Tab::Headers, headers);
         });
         ui.separator();
         match self.tab {
+            Tab::Events => {
+                if let Some(events) = &mut self.events {
+                    events.show(ui);
+                }
+            }
             Tab::Body => self.body(ui),
             Tab::Headers => headers_table(ui, &self.response.headers),
         }
@@ -187,15 +207,6 @@ impl ResponseView {
     }
 }
 
-fn pretty_json(text: &str) -> Option<String> {
-    let trimmed = text.trim_start();
-    if !trimmed.starts_with(['{', '[']) {
-        return None;
-    }
-    let value: serde_json::Value = serde_json::from_str(text).ok()?;
-    serde_json::to_string_pretty(&value).ok()
-}
-
 fn headers_table(ui: &mut egui::Ui, headers: &[(String, String)]) {
     egui::ScrollArea::vertical()
         .auto_shrink(false)
@@ -261,7 +272,7 @@ mod tests {
     #[test]
     fn pretty_json_keeps_server_key_order() {
         assert_eq!(
-            pretty_json(r#"{"z":1,"a":2}"#).as_deref(),
+            format::pretty_json(r#"{"z":1,"a":2}"#).as_deref(),
             Some("{\n  \"z\": 1,\n  \"a\": 2\n}")
         );
     }
@@ -271,7 +282,31 @@ mod tests {
         let view = ResponseView::new(response(b"<html></html>"));
         assert_eq!(view.mode, Mode::Raw);
         assert!(view.pretty.is_none());
-        assert_eq!(pretty_json("42"), None);
+        assert_eq!(format::pretty_json("42"), None);
+    }
+
+    #[test]
+    fn event_streams_open_on_their_events() {
+        let mut events = EventLog::default();
+        events.push(
+            Duration::from_millis(5),
+            cornu_core::SseEvent {
+                event: "tick".into(),
+                data: "1".into(),
+                id: None,
+                retry: None,
+            },
+        );
+        let mut view = ResponseView::new(response(b"event: tick\ndata: 1\n\n")).with_events(events);
+        assert_eq!(view.tab, Tab::Events);
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(Default::default(), |ui| view.show(ui));
+        output.textures_delta.clear();
+        let shapes = format!("{:?}", output.shapes);
+        assert!(
+            shapes.contains("Events (1)") && shapes.contains("tick"),
+            "{shapes}"
+        );
     }
 
     #[test]

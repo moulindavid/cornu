@@ -3,6 +3,7 @@ mod client_settings;
 mod cookies;
 mod editor;
 mod environments;
+mod events;
 mod folder;
 mod format;
 mod highlight;
