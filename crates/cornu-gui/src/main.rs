@@ -6,6 +6,7 @@ mod environments;
 mod events;
 mod folder;
 mod format;
+mod grpc;
 mod highlight;
 mod history;
 mod import;
