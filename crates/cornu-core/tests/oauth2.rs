@@ -147,7 +147,7 @@ async fn server_errors_and_missing_tokens_are_reported() {
     let mut code = config(&server);
     code.grant = Grant::AuthorizationCode;
     let request = request.with_auth(Auth::OAuth2(code));
-    assert!(oauth_error(client.send(&request).await).contains("authorize"));
+    assert!(oauth_error(client.send(&request).await).contains("get one from the Auth tab"));
 }
 
 /// Plays the browser: follows the authorization URL straight to the redirect URI.

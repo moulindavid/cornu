@@ -156,12 +156,54 @@ async fn delay_spaces_requests_but_not_after_the_last() {
         options: RunOptions {
             concurrency: 1,
             delay: Duration::from_millis(200),
+            ..Default::default()
         },
     };
     let (summary, _) = execute(plan, &CancelToken::default()).await;
     assert_eq!(summary.succeeded, 4);
     assert!(summary.elapsed >= Duration::from_millis(600), "{summary:?}");
     assert!(summary.elapsed < Duration::from_millis(780), "{summary:?}");
+}
+
+#[tokio::test]
+async fn one_at_a_time_rows_run_in_order_and_bail_stops_at_the_first_failure() {
+    let server = MockServer::start().await;
+    Mock::given(path_regex("^/users/[a-y]+$"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    Mock::given(path("/users/zoe"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    let names = ["ada", "bob", "cy", "zoe", "dan", "eve"];
+    let plan = |bail| RunPlan {
+        steps: vec![step(format!("{}/users/{{{{name}}}}", server.uri()), &[])],
+        rows: names.iter().map(|name| row(&[("name", name)])).collect(),
+        options: RunOptions {
+            bail,
+            ..Default::default()
+        },
+    };
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    run(&client(), plan(false), &CancelToken::default(), tx).await;
+    let mut order = Vec::new();
+    while let Ok(result) = rx.try_recv() {
+        order.push(result.iteration);
+    }
+    assert_eq!(order, [0, 1, 2, 3, 4, 5]);
+
+    let (summary, results) = execute(plan(true), &CancelToken::default()).await;
+    assert_eq!(
+        (summary.succeeded, summary.failed, summary.skipped),
+        (3, 1, 2)
+    );
+    assert!(summary.cancelled);
+    assert_eq!(
+        results.last().unwrap().request.url,
+        format!("{}/users/zoe", server.uri())
+    );
 }
 
 #[tokio::test]

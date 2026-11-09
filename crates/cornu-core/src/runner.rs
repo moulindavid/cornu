@@ -30,6 +30,8 @@ pub struct RunOptions {
     pub concurrency: usize,
     /// Pause after each request of an iteration, to stay under rate limits.
     pub delay: Duration,
+    /// Cancel the run at the first request that does not pass.
+    pub bail: bool,
 }
 
 impl Default for RunOptions {
@@ -37,6 +39,7 @@ impl Default for RunOptions {
         Self {
             concurrency: 1,
             delay: Duration::ZERO,
+            bail: false,
         }
     }
 }
@@ -136,18 +139,22 @@ pub async fn run(
     let mut tasks = JoinSet::new();
     let mut rows = plan.rows.into_iter();
     for iteration in 0..iterations {
+        // Taken here rather than in the task, so iterations start in order.
+        let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
+            break;
+        };
+        if cancel.is_cancelled() {
+            break;
+        }
         let row = rows.next().unwrap_or_default();
         let client = client.clone();
         let steps = Arc::clone(&steps);
-        let permits = Arc::clone(&permits);
         let cancel = cancel.clone();
         let results = results.clone();
         let counts = counts_tx.clone();
         let last_iteration = iteration + 1 == iterations;
         tasks.spawn(async move {
-            let Ok(_permit) = permits.acquire().await else {
-                return;
-            };
+            let _permit = permit;
             // Captures feed the next steps of this iteration only, over the row values.
             let mut captures = Vec::new();
             for (index, step) in steps.iter().enumerate() {
@@ -161,7 +168,7 @@ pub async fn run(
                     .with_layer(captures.iter().cloned());
                 let resolved = step.request.resolve(&variables);
                 let outcome = tokio::select! {
-                    outcome = client.send(&resolved.request) => outcome,
+                    outcome = send(&client, &resolved.request) => outcome,
                     _ = cancel.cancelled() => Err(SendError::Cancelled),
                 };
                 let (captured, assertions) = match &outcome {
@@ -172,11 +179,15 @@ pub async fn run(
                     Err(_) => (Vec::new(), Vec::new()),
                 };
                 store(&mut captures, &captured);
-                let _ = counts.send(match &outcome {
+                let count = match &outcome {
                     Ok(response) if passed(response, &assertions) => Count::Succeeded,
                     Ok(_) => Count::Failed,
                     Err(_) => Count::Error,
-                });
+                };
+                if options.bail && !matches!(count, Count::Succeeded) {
+                    cancel.cancel();
+                }
+                let _ = counts.send(count);
                 let _ = results.send(StepResult {
                     iteration,
                     step: index,
@@ -216,6 +227,27 @@ pub async fn run(
     }
     summary.skipped = total - summary.succeeded - summary.failed - summary.errors;
     summary
+}
+
+/// Streams, gRPC or server-sent events, end with the timeout and keep what was received.
+async fn send(client: &HttpClient, request: &Request) -> Result<Response, SendError> {
+    if crate::is_websocket_url(&request.url) {
+        return Err(SendError::WebSocket(
+            "WebSocket requests are opened from the app, they cannot be run".into(),
+        ));
+    }
+    let timeout = client.options.timeout;
+    let stop = async move {
+        match timeout {
+            Some(timeout) => tokio::time::sleep(timeout).await,
+            None => std::future::pending().await,
+        }
+    };
+    if crate::is_grpc_url(&request.url) {
+        client.grpc_call(request, stop, |_| {}).await
+    } else {
+        client.send_streaming(request, stop, |_| {}).await
+    }
 }
 
 enum Count {

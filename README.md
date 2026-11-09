@@ -19,7 +19,7 @@ and plain text files you can commit to git.
 - Cookie jar per workspace, kept outside git, with a viewer to inspect and delete cookies
 - OAuth 2.0: client credentials and authorization code with PKCE, tokens fetched, cached and refreshed automatically
 - Client settings per workspace: timeout, redirects, HTTP or SOCKS proxy, custom CA, client certificates (mutual TLS) and an insecure mode for self-signed servers
-- Native desktop GUI built with [egui](https://github.com/emilk/egui)
+- Native desktop GUI built with [egui](https://github.com/emilk/egui), and a headless CLI for CI, scripts and agents
 
 ## Building
 
@@ -29,6 +29,29 @@ cargo run -p cornu-gui --release
 
 On Linux you may need the usual windowing dev packages (X11/Wayland, `libxkbcommon`).
 
+## Command line
+
+`cornu-cli` runs the requests of a workspace without the app, with the same variables, auth,
+captures, tests, cookies and client settings. It finds the workspace from the current folder up,
+or takes `--workspace`.
+
+```sh
+cargo install --path crates/cornu-cli
+
+cornu-cli list                                   # every request, by path
+cornu-cli send users/get --env dev               # one request, with its full response
+cornu-cli run users --env dev --var id=7         # a folder, then a summary
+cornu-cli run --env ci --data users.csv --bail   # the whole workspace, once per CSV row
+cornu-cli run --env ci --junit report.xml        # also a JUnit report for CI
+cornu-cli envs                                   # environments, secrets hidden
+```
+
+`--json` prints a stable JSON document instead of text, for scripts and agents: the resolved
+request (secret values hidden unless `--show-secrets`), the response, captures and test results.
+The exit code is `0` when every request passed, `1` when one failed or could not be sent, and `2`
+for a usage or workspace error. The CLI never prompts: an OAuth 2.0 authorization code token has
+to be fetched once from the app, client credentials tokens are fetched on their own.
+
 ## Workspace layout
 
 | Crate | Purpose |
@@ -37,6 +60,7 @@ On Linux you may need the usual windowing dev packages (X11/Wayland, `libxkbcomm
 | `cornu-storage` | Git-friendly workspace format: one TOML file per request, secrets kept in `.cornu/` |
 | `cornu-import` | Importers: Postman v2.0 / v2.1 collections and environments, OpenAPI 3 / Swagger 2 (JSON or YAML, found from a base URL), cURL (parse and export) |
 | `cornu-gui` | Desktop application (`cornu` binary) |
+| `cornu-cli` | Headless runner (`cornu-cli` binary) for CI, scripts and agents |
 
 ## License
 

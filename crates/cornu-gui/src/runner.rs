@@ -180,6 +180,7 @@ impl RunnerTab {
         RunOptions {
             concurrency: self.concurrency,
             delay: std::time::Duration::from_millis(self.delay_ms),
+            bail: false,
         }
     }
 
