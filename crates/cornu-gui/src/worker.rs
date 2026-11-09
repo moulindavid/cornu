@@ -102,14 +102,17 @@ impl Worker {
                 let _ = tx.send(Update { doc, progress });
                 ctx.request_repaint();
             };
-            let result = client
-                .send_streaming(&request, stopped, |update| {
-                    report(match update {
-                        Streamed::Head(head) => Progress::Streaming(head),
-                        Streamed::Event(event) => Progress::Event(event),
-                    })
+            let on_update = |update| {
+                report(match update {
+                    Streamed::Head(head) => Progress::Streaming(head),
+                    Streamed::Event(event) => Progress::Event(event),
                 })
-                .await;
+            };
+            let result = if cornu_core::is_grpc_url(&request.url) {
+                client.grpc_call(&request, stopped, on_update).await
+            } else {
+                client.send_streaming(&request, stopped, on_update).await
+            };
             report(Progress::Done(result));
         });
         SendHandle {

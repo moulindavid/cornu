@@ -18,13 +18,14 @@ use crate::environments::Environments;
 use crate::events::EventLog;
 use crate::folder::{FolderTab, folder_view};
 use crate::format;
+use crate::grpc::{self, MethodPicker};
 use crate::history::{HistoryAction, HistoryPanel};
 use crate::import::SpecImport;
 use crate::oauth::{Flow, FlowEvent, TokenAction, TokenPanel};
 use crate::project::Project;
 use crate::response::{ResponseView, status_color};
 use crate::runner::{RunTarget, RunnerAction, RunnerTab, StepInfo, folder_requests};
-use crate::tree::{Tree, TreeAction, method_color, websocket_color};
+use crate::tree::{Tree, TreeAction, grpc_color, method_color, websocket_color};
 use crate::websocket::{SocketAction, SocketView, message, set_message};
 use crate::widgets::{assertion_lines, captured_lines, variable_field, vertical_split};
 use crate::worker::{DocId, Progress, Worker};
@@ -62,6 +63,7 @@ struct RequestDoc {
     captured: Vec<Captured>,
     assertions: Vec<AssertionResult>,
     socket: Option<SocketView>,
+    methods: MethodPicker,
 }
 
 impl RequestDoc {
@@ -75,6 +77,7 @@ impl RequestDoc {
             captured: Vec::new(),
             assertions: Vec::new(),
             socket: None,
+            methods: MethodPicker::default(),
         }
     }
 
@@ -1029,7 +1032,10 @@ impl CornuApp {
             });
         }
 
-        let websocket = cornu_core::is_websocket_url(&variables.interpolate(&doc.request.url).text);
+        let resolved_url = variables.interpolate(&doc.request.url).text;
+        let websocket = cornu_core::is_websocket_url(&resolved_url);
+        let grpc = cornu_core::is_grpc_url(&resolved_url);
+        let mut fetch_methods = false;
         if let Some(socket) = &mut doc.socket {
             socket.poll();
         }
@@ -1056,6 +1062,18 @@ impl CornuApp {
                     ),
                 )
                 .on_hover_text("ws:// and wss:// URLs open a WebSocket");
+            } else if grpc {
+                ui.add_sized(
+                    [90.0, ui.spacing().interact_size.y],
+                    egui::Label::new(
+                        egui::RichText::new("gRPC")
+                            .monospace()
+                            .color(grpc_color(ui.visuals())),
+                    ),
+                )
+                .on_hover_text(
+                    "grpc:// and grpcs:// URLs call a method found through server reflection",
+                );
             } else {
                 egui::ComboBox::from_id_salt(("method", id))
                     .selected_text(doc.request.method.as_str())
@@ -1106,6 +1124,14 @@ impl CornuApp {
                     } else {
                         send = true;
                     }
+                }
+                if grpc {
+                    fetch_methods = doc.methods.show(
+                        ui,
+                        &resolved_url,
+                        &mut doc.request.url,
+                        &mut doc.request.body,
+                    );
                 }
                 let url = variable_field(
                     ui,
@@ -1205,6 +1231,7 @@ impl CornuApp {
         );
         let editor_id = egui::Id::unique(("editor", id));
         doc.editor.websocket = websocket;
+        doc.editor.grpc = grpc;
         let mut composed = message(&doc.request.body).to_owned();
         vertical_split(
             ui,
@@ -1250,6 +1277,17 @@ impl CornuApp {
         );
         if websocket {
             set_message(&mut doc.request.body, composed);
+        }
+        if fetch_methods {
+            let mut request = doc.request.clone();
+            request.auth = self.project.effective_auth(path.as_deref(), &request.auth);
+            let request = request.resolve(&variables).request;
+            let pending =
+                self.worker.run(
+                    &ctx,
+                    |client| async move { client.grpc_methods(&request).await },
+                );
+            doc.methods.start(pending, grpc::base(&resolved_url));
         }
         if doc.editor.schema.take_fetch_request() {
             let mut request = doc.request.clone();

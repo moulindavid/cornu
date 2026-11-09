@@ -41,6 +41,8 @@ pub struct EditorState {
     pub token: TokenPanel,
     /// Messages are composed next to the log, and captures and tests do not apply.
     pub websocket: bool,
+    /// The body is the JSON message and the query does not apply.
+    pub grpc: bool,
 }
 
 pub fn request_editor(
@@ -63,9 +65,17 @@ pub fn request_editor(
         if state.websocket && matches!(state.tab, Tab::Body | Tab::Captures | Tab::Tests) {
             state.tab = Tab::Params;
         }
-        ui.selectable_value(&mut state.tab, Tab::Params, params);
+        if state.grpc && state.tab == Tab::Params {
+            state.tab = Tab::Body;
+        }
+        if !state.grpc {
+            ui.selectable_value(&mut state.tab, Tab::Params, params);
+        }
+        if state.grpc {
+            ui.selectable_value(&mut state.tab, Tab::Body, "Message");
+        }
         ui.selectable_value(&mut state.tab, Tab::Headers, headers);
-        if !state.websocket {
+        if !state.websocket && !state.grpc {
             ui.selectable_value(&mut state.tab, Tab::Body, body);
         }
         ui.selectable_value(&mut state.tab, Tab::Auth, auth);
@@ -90,6 +100,7 @@ pub fn request_editor(
         .show(ui, |ui| match state.tab {
             Tab::Params => key_value_table(ui, id.with("params"), &mut request.query),
             Tab::Headers => key_value_table(ui, id.with("headers"), &mut request.headers),
+            Tab::Body if state.grpc => message_editor(ui, &mut request.body, state),
             Tab::Body => {
                 let before = body_kind(&request.body);
                 body_editor(ui, id.with("body"), &mut request.body, state);
@@ -327,6 +338,28 @@ fn convert_body(body: &Body, kind: BodyKind) -> Body {
             query: String::new(),
             variables: String::new(),
         }),
+    }
+}
+
+fn message_editor(ui: &mut egui::Ui, body: &mut Body, state: &mut EditorState) {
+    let mut text = crate::websocket::message(body).to_owned();
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        if ui.button("Format").clicked() {
+            state.json_error = format_json(&mut text).err();
+            changed = true;
+        }
+        ui.weak("The input message as JSON, an array of messages for client streaming.");
+        if let Some(error) = &state.json_error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+    });
+    if code_area(ui, &mut text).changed() {
+        state.json_error = None;
+        changed = true;
+    }
+    if changed {
+        crate::websocket::set_message(body, text);
     }
 }
 
@@ -928,6 +961,31 @@ mod tests {
         for expected in ["Authorization URL", "Redirect URI", "PKCE"] {
             assert!(code.contains(expected), "{expected} in {code}");
         }
+    }
+
+    #[test]
+    fn grpc_requests_edit_a_json_message_instead_of_params() {
+        let mut request = Request::new(Method::Post, "grpc://localhost/test.Greeter/SayHello");
+        let mut state = EditorState {
+            grpc: true,
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            request_editor(ui, egui::Id::unique("editor"), &mut request, &mut state);
+        });
+        output.textures_delta.clear();
+        let text = format!("{:?}", output.shapes);
+        assert_eq!(state.tab, Tab::Body);
+        assert_eq!(request.body, Body::None);
+        assert!(
+            text.contains("Message") && text.contains("client streaming"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("Params") && !text.contains("Multipart"),
+            "{text}"
+        );
     }
 
     #[test]

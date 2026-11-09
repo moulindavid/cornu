@@ -156,6 +156,8 @@ pub enum SendError {
     InvalidGraphqlVariables(String),
     #[error("WebSocket: {0}")]
     WebSocket(String),
+    #[error("gRPC: {0}")]
+    Grpc(String),
     #[error("request timed out")]
     Timeout,
     #[error("cancelled")]
@@ -196,7 +198,7 @@ pub struct HttpClient {
     /// replace it with the jar's.
     plain: Option<reqwest::Client>,
     tokens: TokenStore,
-    pub(crate) timeout: Option<Duration>,
+    pub(crate) options: std::sync::Arc<ClientOptions>,
 }
 
 fn builder(options: &ClientOptions) -> Result<reqwest::ClientBuilder, SendError> {
@@ -249,7 +251,7 @@ fn builder(options: &ClientOptions) -> Result<reqwest::ClientBuilder, SendError>
     Ok(builder)
 }
 
-fn read_pem(path: &Path) -> Result<Vec<u8>, SendError> {
+pub(crate) fn read_pem(path: &Path) -> Result<Vec<u8>, SendError> {
     std::fs::read(path).map_err(|source| SendError::ReadFile {
         path: path.to_owned(),
         source,
@@ -269,7 +271,7 @@ impl HttpClient {
             client: builder(options)?.build()?,
             plain: None,
             tokens: TokenStore::default(),
-            timeout: options.timeout,
+            options: std::sync::Arc::new(options.clone()),
         })
     }
 
@@ -281,7 +283,7 @@ impl HttpClient {
                 .build()?,
             plain: Some(builder(options)?.build()?),
             tokens: TokenStore::default(),
-            timeout: options.timeout,
+            options: std::sync::Arc::new(options.clone()),
         })
     }
 
@@ -324,17 +326,7 @@ impl HttpClient {
         &self,
         request: &Request,
     ) -> Result<reqwest::RequestBuilder, SendError> {
-        let authorized;
-        let request = match &request.auth {
-            Auth::OAuth2(config) => {
-                let token = crate::oauth2::token(&self.client, &self.tokens, config).await?;
-                authorized = request.clone().with_auth(Auth::Bearer {
-                    token: token.access_token,
-                });
-                &authorized
-            }
-            _ => request,
-        };
+        let request = &*self.authorized(request).await?;
         let url = build_url(request)?;
         let mut headers = build_headers(request)?;
         let method = reqwest::Method::from_bytes(request.method.as_str().as_bytes())
@@ -370,6 +362,29 @@ impl HttpClient {
                     .map_err(|error| SendError::InvalidGraphqlVariables(error.to_string()))?,
             ),
         })
+    }
+}
+
+impl HttpClient {
+    /// The request with an OAuth2 token in place of its configuration.
+    async fn authorized<'a>(
+        &self,
+        request: &'a Request,
+    ) -> Result<std::borrow::Cow<'a, Request>, SendError> {
+        Ok(match &request.auth {
+            Auth::OAuth2(config) => {
+                let token = crate::oauth2::token(&self.client, &self.tokens, config).await?;
+                std::borrow::Cow::Owned(request.clone().with_auth(Auth::Bearer {
+                    token: token.access_token,
+                }))
+            }
+            _ => std::borrow::Cow::Borrowed(request),
+        })
+    }
+
+    /// The request's headers with its auth, as gRPC metadata.
+    pub(crate) async fn headers(&self, request: &Request) -> Result<HeaderMap, SendError> {
+        build_headers(&*self.authorized(request).await?)
     }
 }
 

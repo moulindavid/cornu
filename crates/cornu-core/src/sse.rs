@@ -127,6 +127,7 @@ impl HttpClient {
             .await?
             .timeout(Duration::from_secs(365 * 24 * 3600));
         let deadline = self
+            .options
             .timeout
             .map(|timeout| tokio::time::Instant::now() + timeout);
         let started = Instant::now();
@@ -180,7 +181,7 @@ impl HttpClient {
     }
 }
 
-async fn within<F: Future>(
+pub(crate) async fn within<F: Future>(
     deadline: Option<tokio::time::Instant>,
     future: F,
 ) -> Result<F::Output, SendError> {

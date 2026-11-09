@@ -220,6 +220,8 @@ fn request_label(ui: &egui::Ui, entry: &RequestEntry) -> egui::text::LayoutJob {
     let method = &entry.request.method;
     let (label, color) = if cornu_core::is_websocket_url(&entry.request.url) {
         ("WS", websocket_color(ui.visuals()))
+    } else if cornu_core::is_grpc_url(&entry.request.url) {
+        ("gRPC", grpc_color(ui.visuals()))
     } else {
         (short_method(method), method_color(method, ui.visuals()))
     };
@@ -258,6 +260,14 @@ pub fn websocket_color(visuals: &egui::Visuals) -> egui::Color32 {
         egui::Color32::from_rgb(0x6c, 0xd6, 0xd0)
     } else {
         egui::Color32::from_rgb(0x00, 0x7c, 0x78)
+    }
+}
+
+pub fn grpc_color(visuals: &egui::Visuals) -> egui::Color32 {
+    if visuals.dark_mode {
+        egui::Color32::from_rgb(0xc4, 0x9b, 0xf0)
+    } else {
+        egui::Color32::from_rgb(0x6b, 0x3f, 0xa0)
     }
 }
 
