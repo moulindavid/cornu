@@ -261,12 +261,7 @@ fn entry_row(ui: &mut egui::Ui, entry: &Entry) {
         if ui.small_button("📋").on_hover_text("Copy").clicked() {
             ui.ctx().copy_text(body.clone());
         }
-        let shown = match serde_json::from_str::<serde_json::Value>(&body) {
-            Ok(value) if value.is_object() || value.is_array() => {
-                serde_json::to_string_pretty(&value).unwrap_or(body)
-            }
-            _ => body,
-        };
+        let shown = format::pretty_json(&body).unwrap_or(body);
         ui.add(egui::Label::new(egui::RichText::new(shown).monospace()).wrap());
     });
 }

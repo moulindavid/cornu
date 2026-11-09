@@ -3,29 +3,31 @@ use std::time::Instant;
 
 use cornu_core::runner::{RunPlan, Step};
 use cornu_core::{
-    Assertion, AssertionResult, Auth, Captured, ClientOptions, Method, OAuth2, Request, capture,
-    check, store,
+    Assertion, AssertionResult, Auth, Captured, ClientOptions, Method, OAuth2, Request, Response,
+    capture, check, store,
 };
 use cornu_storage::{HistoryEntry, Outcome, moved_path};
-use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
+use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers};
+use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 
 use crate::client_settings::ClientSettingsWindow;
 use crate::cookies::CookiesWindow;
 use crate::editor::{self, EditorState};
 use crate::environments::Environments;
+use crate::events::EventLog;
 use crate::folder::{FolderTab, folder_view};
 use crate::format;
 use crate::history::{HistoryAction, HistoryPanel};
 use crate::import::SpecImport;
 use crate::oauth::{Flow, FlowEvent, TokenAction, TokenPanel};
 use crate::project::Project;
-use crate::response::ResponseView;
+use crate::response::{ResponseView, status_color};
 use crate::runner::{RunTarget, RunnerAction, RunnerTab, StepInfo, folder_requests};
 use crate::tree::{Tree, TreeAction, method_color, websocket_color};
 use crate::websocket::{SocketAction, SocketView, message, set_message};
 use crate::widgets::{assertion_lines, captured_lines, variable_field, vertical_split};
-use crate::worker::{DocId, Worker};
+use crate::worker::{DocId, Progress, Worker};
 
 const SEND_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
 const SAVE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
@@ -36,12 +38,15 @@ enum SendState {
     Idle,
     Sending {
         abort: AbortHandle,
+        stop: Option<oneshot::Sender<()>>,
         started: Instant,
         /// The request as edited when it was sent, recorded in the history.
         sent: Box<Request>,
         timestamp: i64,
         /// With their expected values resolved.
         assertions: Vec<Assertion>,
+        /// Set once the response turns out to be an event stream.
+        stream: Option<Box<(Response, EventLog)>>,
     },
     Done(Box<ResponseView>),
     Failed(String),
@@ -646,9 +651,9 @@ impl CornuApp {
     }
 
     fn collect_completed(&mut self) {
-        let completed: Vec<_> = self.worker.completed().collect();
-        for done in completed {
-            let Some(document) = self.documents.iter_mut().find(|doc| doc.id == done.doc) else {
+        let updates: Vec<_> = self.worker.updates().collect();
+        for update in updates {
+            let Some(document) = self.documents.iter_mut().find(|doc| doc.id == update.doc) else {
                 continue;
             };
             let Content::Request(doc) = &mut document.content else {
@@ -659,12 +664,28 @@ impl CornuApp {
                 sent,
                 timestamp,
                 assertions,
+                started,
+                stream,
                 ..
-            } = &doc.state
+            } = &mut doc.state
             else {
                 continue;
             };
-            let outcome = match &done.result {
+            let result = match update.progress {
+                Progress::Streaming(head) => {
+                    *stream = Some(Box::new((head, EventLog::default())));
+                    continue;
+                }
+                Progress::Event(event) => {
+                    if let Some(stream) = stream {
+                        stream.1.push(started.elapsed(), event);
+                    }
+                    continue;
+                }
+                Progress::Done(result) => result,
+            };
+            let events = stream.take().map(|stream| stream.1);
+            let outcome = match &result {
                 Ok(response) => Outcome::Response {
                     status: response.status,
                     elapsed_ms: response.elapsed.as_millis() as u64,
@@ -680,13 +701,20 @@ impl CornuApp {
                 source: document.path.clone(),
                 outcome,
             };
-            if let Ok(response) = &done.result {
+            if let Ok(response) = &result {
                 doc.captured = capture(&sent.captures, response);
                 doc.assertions = check(assertions, response);
                 store(&mut self.project.captured, &doc.captured);
             }
-            doc.state = match done.result {
-                Ok(response) => SendState::Done(Box::new(ResponseView::new(response))),
+            doc.state = match result {
+                Ok(response) => {
+                    let view = ResponseView::new(response);
+                    let view = match events {
+                        Some(events) => view.with_events(events),
+                        None => view,
+                    };
+                    SendState::Done(Box::new(view))
+                }
                 Err(error) => SendState::Failed(error.to_string()),
             };
             if let Err(error) = self.project.history.push(entry) {
@@ -1040,9 +1068,17 @@ impl CornuApp {
                     });
             }
             let sending = matches!(doc.state, SendState::Sending { .. });
+            let streaming = matches!(
+                doc.state,
+                SendState::Sending {
+                    stream: Some(_),
+                    ..
+                }
+            );
             let button = match (websocket, socket_live, sending) {
                 (true, true, _) => "Disconnect",
                 (true, false, _) => "Connect",
+                (false, _, true) if streaming => "Stop",
                 (false, _, true) => "Cancel",
                 (false, _, false) => "Send",
             };
@@ -1127,7 +1163,17 @@ impl CornuApp {
             }
             send = false;
         }
-        if cancel && let SendState::Sending { abort, .. } = &doc.state {
+        if cancel
+            && let SendState::Sending {
+                stream: Some(_),
+                stop,
+                ..
+            } = &mut doc.state
+        {
+            if let Some(stop) = stop.take() {
+                let _ = stop.send(());
+            }
+        } else if cancel && let SendState::Sending { abort, .. } = &doc.state {
             abort.abort();
             doc.state = SendState::Failed("Cancelled".into());
         } else if send && !matches!(doc.state, SendState::Sending { .. }) {
@@ -1138,13 +1184,15 @@ impl CornuApp {
             doc.captured.clear();
             doc.assertions.clear();
             let assertions = resolved.request.assertions.clone();
-            let abort = self.worker.send(&ctx, id, resolved.request);
+            let handle = self.worker.send(&ctx, id, resolved.request);
             doc.state = SendState::Sending {
-                abort,
+                abort: handle.abort,
+                stop: Some(handle.stop),
                 started: Instant::now(),
                 sent: Box::new(doc.request.clone()),
                 timestamp: format::unix_now(),
                 assertions,
+                stream: None,
             };
         }
 
@@ -1540,6 +1588,37 @@ fn response_view(ui: &mut egui::Ui, state: &mut SendState) {
         SendState::Idle => {
             ui.weak("Send a request to see the response (Ctrl+Enter).");
         }
+        SendState::Sending {
+            stream: Some(stream),
+            stop,
+            ..
+        } => {
+            let (head, events) = &mut **stream;
+            ui.horizontal(|ui| {
+                ui.spinner();
+                if stop.is_some() {
+                    ui.colored_label(Color32::from_rgb(80, 170, 90), "● Streaming");
+                } else {
+                    ui.label("Stopping…");
+                }
+                ui.separator();
+                let status = format!("{} {}", head.status, head.reason().unwrap_or(""));
+                ui.label(
+                    egui::RichText::new(status)
+                        .strong()
+                        .color(status_color(head.status)),
+                )
+                .on_hover_ui(|ui| {
+                    for (name, value) in &head.headers {
+                        ui.monospace(format!("{name}: {value}"));
+                    }
+                });
+                ui.separator();
+                ui.weak(format!("first byte {}", format::duration(head.elapsed)));
+            });
+            ui.separator();
+            events.show(ui);
+        }
         SendState::Sending { started, .. } => {
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -1817,6 +1896,91 @@ mod tests {
     }
 
     #[test]
+    fn event_streams_show_live_and_stop_into_a_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let url = runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/events", listener.local_addr().unwrap());
+            tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let _ = stream.read(&mut [0; 1024]).await;
+                let event = "data: {\"n\":1}\n\n";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{event}\r\n",
+                    event.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                // Never ends on its own.
+                let _ = stream.read(&mut [0; 1024]).await;
+            });
+            url
+        });
+
+        let mut app = CornuApp::new(Worker::new().unwrap(), None);
+        let request = Request::new(Method::Get, url);
+        app.open_draft(request.clone());
+        let id = app.active.unwrap();
+        let ctx = egui::Context::default();
+        let handle = app.worker.send(&ctx, id, request.clone());
+        fn doc(app: &mut CornuApp) -> &mut RequestDoc {
+            let id = app.active.unwrap();
+            let doc = app.documents.iter_mut().find(|doc| doc.id == id).unwrap();
+            let Content::Request(doc) = &mut doc.content else {
+                panic!("not a request")
+            };
+            doc
+        }
+        doc(&mut app).state = SendState::Sending {
+            abort: handle.abort,
+            stop: Some(handle.stop),
+            started: Instant::now(),
+            assertions: Vec::new(),
+            sent: Box::new(request),
+            timestamp: 0,
+            stream: None,
+        };
+        let wait = |app: &mut CornuApp, done: &dyn Fn(&SendState) -> bool| {
+            let started = Instant::now();
+            while !done(&doc(app).state) {
+                assert!(started.elapsed().as_secs() < 5, "timed out");
+                app.collect_completed();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let render = |app: &mut CornuApp| {
+            let mut output = ctx.run_ui(Default::default(), |ui| app.request_view(ui, id));
+            output.textures_delta.clear();
+            format!("{:?}", output.shapes)
+        };
+
+        wait(
+            &mut app,
+            &|state| matches!(state, SendState::Sending { stream: Some(stream), .. } if stream.1.len() == 1),
+        );
+        let shapes = render(&mut app);
+        for expected in ["Streaming", "200 OK", "Stop", "1 event", "\\\"n\\\": 1"] {
+            assert!(shapes.contains(expected), "{expected} in {shapes}");
+        }
+
+        if let SendState::Sending { stop, .. } = &mut doc(&mut app).state {
+            stop.take().unwrap().send(()).unwrap();
+        }
+        wait(&mut app, &|state| matches!(state, SendState::Done(_)));
+        let shapes = render(&mut app);
+        assert!(
+            shapes.contains("Events (1)") && shapes.contains("Send"),
+            "{shapes}"
+        );
+        let history = app.project.history.entries();
+        assert!(matches!(
+            history.last().map(|entry| &entry.outcome),
+            Some(Outcome::Response { status: 200, .. })
+        ));
+    }
+
+    #[test]
     fn sent_requests_capture_values_into_session_variables() {
         use cornu_core::Capture;
         use wiremock::matchers::method;
@@ -1848,17 +2012,19 @@ mod tests {
         app.open_draft(request.clone());
         let id = app.active.unwrap();
         let ctx = egui::Context::default();
-        let abort = app.worker.send(&ctx, id, request.clone());
+        let handle = app.worker.send(&ctx, id, request.clone());
         let doc = app.documents.iter_mut().find(|doc| doc.id == id).unwrap();
         let Content::Request(doc) = &mut doc.content else {
             panic!("not a request")
         };
         doc.state = SendState::Sending {
-            abort,
+            abort: handle.abort,
+            stop: Some(handle.stop),
             started: Instant::now(),
             assertions: request.assertions.clone(),
             sent: Box::new(request),
             timestamp: 0,
+            stream: None,
         };
 
         let started = Instant::now();

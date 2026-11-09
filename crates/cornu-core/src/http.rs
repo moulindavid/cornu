@@ -196,6 +196,7 @@ pub struct HttpClient {
     /// replace it with the jar's.
     plain: Option<reqwest::Client>,
     tokens: TokenStore,
+    pub(crate) timeout: Option<Duration>,
 }
 
 fn builder(options: &ClientOptions) -> Result<reqwest::ClientBuilder, SendError> {
@@ -268,6 +269,7 @@ impl HttpClient {
             client: builder(options)?.build()?,
             plain: None,
             tokens: TokenStore::default(),
+            timeout: options.timeout,
         })
     }
 
@@ -279,6 +281,7 @@ impl HttpClient {
                 .build()?,
             plain: Some(builder(options)?.build()?),
             tokens: TokenStore::default(),
+            timeout: options.timeout,
         })
     }
 

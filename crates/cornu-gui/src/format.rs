@@ -1,5 +1,14 @@
 use std::time::Duration;
 
+/// Objects and arrays only: a bare number or string is shown as it came.
+pub fn pretty_json(text: &str) -> Option<String> {
+    if !text.trim_start().starts_with(['{', '[']) {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    serde_json::to_string_pretty(&value).ok()
+}
+
 pub fn size(bytes: usize) -> String {
     const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
     let mut value = bytes as f64;

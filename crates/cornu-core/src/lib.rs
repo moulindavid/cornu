@@ -12,6 +12,7 @@ mod oauth2;
 mod request;
 mod response;
 pub mod runner;
+mod sse;
 mod variables;
 mod websocket;
 
@@ -29,6 +30,7 @@ pub use oauth2::{
 };
 pub use request::{Request, Resolved};
 pub use response::Response;
+pub use sse::{SseEvent, SseParser, Streamed, is_event_stream};
 pub use variables::{DYNAMIC_VARIABLES, Interpolated, Segment, Variables, is_dynamic, segments};
 
 pub use websocket::{WebSocket, WsCommand, WsEvent, WsMessage, is_websocket_url};
