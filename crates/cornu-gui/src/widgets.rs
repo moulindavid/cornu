@@ -262,6 +262,19 @@ pub fn captured_lines(ui: &mut egui::Ui, captured: &[Captured]) {
     }
 }
 
+pub fn log_lines(ui: &mut egui::Ui, logs: &[String]) {
+    if logs.is_empty() {
+        return;
+    }
+    egui::CollapsingHeader::new(format!("Console ({})", logs.len()))
+        .id_salt("script-logs")
+        .show(ui, |ui| {
+            for line in logs {
+                ui.add(egui::Label::new(egui::RichText::new(line).monospace()).selectable(true));
+            }
+        });
+}
+
 pub fn assertion_lines(ui: &mut egui::Ui, results: &[AssertionResult]) {
     if results.is_empty() {
         return;

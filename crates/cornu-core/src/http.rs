@@ -158,6 +158,8 @@ pub enum SendError {
     WebSocket(String),
     #[error("gRPC: {0}")]
     Grpc(String),
+    #[error("{0}")]
+    Script(String),
     #[error("request timed out")]
     Timeout,
     #[error("cancelled")]

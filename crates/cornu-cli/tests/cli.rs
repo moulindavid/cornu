@@ -394,3 +394,49 @@ fn usage_errors_exit_with_two_and_say_what_to_do() {
     assert_eq!(output.code, 2);
     assert!(output.stderr.contains("NAME=VALUE"), "{}", output.stderr);
 }
+
+#[test]
+fn scripts_print_and_test_in_both_outputs() {
+    let fixture = fixture();
+    let workspace = Workspace::load(fixture.dir.path()).unwrap();
+    let mut request = Request::new(Method::Get, "{{base}}/hello/{{name}}").with_name("Scripted");
+    request.scripts = cornu_core::Scripts {
+        pre: "vars.name = \"bob\";".into(),
+        post: "print(`got ${response.body}`);\ntest(\"greets bob\", response.body == \"hi bob\");\ntest(\"greets ada\", response.body == \"hi ada\");".into(),
+    };
+    workspace
+        .save_request(&RequestEntry {
+            path: "api/4-scripted.req.toml".into(),
+            request,
+        })
+        .unwrap();
+
+    let output = cli(
+        fixture.dir.path(),
+        &["run", "api/4-scripted", "--env", "dev"],
+    );
+    assert_eq!(output.code, 1, "{}", output.stdout);
+    for expected in [
+        "✘ 200  GET     api/4-scripted",
+        "› got hi bob",
+        "✘ greets ada: failed",
+    ] {
+        assert!(
+            output.stdout.contains(expected),
+            "{expected} in {}",
+            output.stdout
+        );
+    }
+    let json = cli(
+        fixture.dir.path(),
+        &["send", "api/4-scripted", "--env", "dev", "--json"],
+    )
+    .json();
+    assert_eq!(json["logs"], serde_json::json!(["got hi bob"]));
+    assert_eq!(
+        json["captures"][0],
+        serde_json::json!({"variable": "name", "value": "bob"})
+    );
+    assert_eq!(json["assertions"][0]["passed"], true);
+    assert_eq!(json["assertions"][1]["passed"], false);
+}

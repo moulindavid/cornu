@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use cornu_core::{
     ApiKeyLocation, AssertSource, Assertion, Auth, Body, Capture, CaptureSource, ClientAuth,
     DEFAULT_REDIRECT_URI, Grant, KeyValue, Method, MultipartPart, OAuth2, Operator, PartValue,
-    Request,
+    Request, Scripts,
 };
 use eframe::egui;
 
@@ -30,6 +30,7 @@ enum Tab {
     Auth,
     Captures,
     Tests,
+    Scripts,
 }
 
 #[derive(Debug, Default)]
@@ -62,7 +63,12 @@ pub fn request_editor(
             AuthKind::Inherit => "Auth".to_owned(),
             kind => format!("Auth ({})", kind.label()),
         };
-        if state.websocket && matches!(state.tab, Tab::Body | Tab::Captures | Tab::Tests) {
+        if state.websocket
+            && matches!(
+                state.tab,
+                Tab::Body | Tab::Captures | Tab::Tests | Tab::Scripts
+            )
+        {
             state.tab = Tab::Params;
         }
         if state.grpc && state.tab == Tab::Params {
@@ -92,6 +98,11 @@ pub fn request_editor(
             count => format!("Tests ({count})"),
         };
         ui.selectable_value(&mut state.tab, Tab::Tests, tests);
+        ui.selectable_value(
+            &mut state.tab,
+            Tab::Scripts,
+            scripts_label(&request.scripts),
+        );
     });
     ui.separator();
 
@@ -115,6 +126,7 @@ pub fn request_editor(
             Tab::Auth => auth_editor(ui, &mut request.auth, &mut state.token),
             Tab::Captures => capture_table(ui, id.with("captures"), &mut request.captures),
             Tab::Tests => assertion_table(ui, id.with("tests"), &mut request.assertions),
+            Tab::Scripts => scripts_editor(ui, &mut request.scripts),
         });
 }
 
@@ -473,6 +485,56 @@ fn variables_problem(variables: &str) -> Option<String> {
         Ok(_) => Some("Variables must be a JSON object".into()),
         Err(error) => Some(format!("Invalid JSON: {error}")),
     }
+}
+
+pub fn scripts_label(scripts: &Scripts) -> &'static str {
+    if scripts.is_empty() {
+        "Scripts"
+    } else {
+        "Scripts ●"
+    }
+}
+
+/// The Rhai scripts of a request or of a folder, whose scripts run first.
+pub fn scripts_editor(ui: &mut egui::Ui, scripts: &mut Scripts) {
+    ui.strong("Pre-request");
+    ui.weak(
+        "Runs before variables are resolved: change request.method, url, headers, query or body, \
+         set vars.name, and resolve(\"{{name}}\") for a value.",
+    );
+    script_area(ui, &mut scripts.pre);
+    ui.add_space(8.0);
+    ui.strong("Post-response");
+    ui.weak(
+        "Reads response.status, headers, body, json, time and size; set vars.name and add \
+         test(\"name\", condition).",
+    );
+    script_area(ui, &mut scripts.post);
+    ui.add_space(4.0);
+    egui::CollapsingHeader::new("Helpers")
+        .id_salt("script-helpers")
+        .show(ui, |ui| {
+            for line in [
+                "print(value)                     shown in the Console of the response",
+                "sha256(text)                     hex digest",
+                "hmac_sha256(key, text)           hex signature",
+                "hmac_sha256_base64(key, text)    base64 signature",
+                "base64_encode(text), base64_decode(text), url_encode(text)",
+                "uuid(), timestamp(), timestamp_ms(), now_iso()",
+            ] {
+                ui.monospace(line);
+            }
+            ui.hyperlink_to("The Rhai language", "https://rhai.rs/book/language/");
+        });
+}
+
+fn script_area(ui: &mut egui::Ui, text: &mut String) {
+    ui.add(
+        egui::TextEdit::multiline(text)
+            .code_editor()
+            .desired_rows(8)
+            .desired_width(f32::INFINITY),
+    );
 }
 
 fn code_area(ui: &mut egui::Ui, text: &mut String) -> egui::Response {
@@ -986,6 +1048,31 @@ mod tests {
             !text.contains("Params") && !text.contains("Multipart"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn scripts_tab_edits_both_scripts_and_lists_the_helpers() {
+        let mut request = Request::new(Method::Get, "https://api.example");
+        request.scripts.post = "test(\"ok\", response.status == 200);".into();
+        let mut state = EditorState {
+            tab: Tab::Scripts,
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            request_editor(ui, egui::Id::unique("editor"), &mut request, &mut state);
+        });
+        output.textures_delta.clear();
+        let text = format!("{:?}", output.shapes);
+        for expected in [
+            "Scripts ●",
+            "Pre-request",
+            "Post-response",
+            "response.status == 200",
+            "Helpers",
+        ] {
+            assert!(text.contains(expected), "{expected} in {text}");
+        }
     }
 
     #[test]

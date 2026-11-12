@@ -84,7 +84,7 @@ impl Importer {
     fn finish(mut self) -> Vec<String> {
         if self.scripts > 0 {
             self.warnings.push(format!(
-                "{} pre-request or test script(s) skipped: cornu does not run Postman scripts",
+                "{} pre-request or test script(s) skipped: Postman scripts are JavaScript, rewrite them in Rhai in the Scripts tab",
                 self.scripts
             ));
         }
@@ -167,6 +167,7 @@ impl Importer {
             body,
             captures: Vec::new(),
             assertions: Vec::new(),
+            scripts: Default::default(),
         }
     }
 

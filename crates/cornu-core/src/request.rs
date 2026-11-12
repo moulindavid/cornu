@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Assertion, Auth, Body, Capture, KeyValue, Method, PartValue, Variables};
+use crate::{Assertion, Auth, Body, Capture, KeyValue, Method, PartValue, Scripts, Variables};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request {
@@ -22,6 +22,8 @@ pub struct Request {
     pub captures: Vec<Capture>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assertions: Vec<Assertion>,
+    #[serde(default, skip_serializing_if = "Scripts::is_empty")]
+    pub scripts: Scripts,
 }
 
 impl Request {

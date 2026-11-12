@@ -3,8 +3,7 @@ use std::time::Instant;
 
 use cornu_core::runner::{RunPlan, Step};
 use cornu_core::{
-    Assertion, AssertionResult, Auth, Captured, ClientOptions, Method, OAuth2, Request, Response,
-    capture, check, store,
+    AssertionResult, Auth, Captured, ClientOptions, Method, OAuth2, Request, Response, store,
 };
 use cornu_storage::{HistoryEntry, Outcome, moved_path};
 use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers};
@@ -27,7 +26,7 @@ use crate::response::{ResponseView, status_color};
 use crate::runner::{RunTarget, RunnerAction, RunnerTab, StepInfo, folder_requests};
 use crate::tree::{Tree, TreeAction, grpc_color, method_color, websocket_color};
 use crate::websocket::{SocketAction, SocketView, message, set_message};
-use crate::widgets::{assertion_lines, captured_lines, variable_field, vertical_split};
+use crate::widgets::{assertion_lines, captured_lines, log_lines, variable_field, vertical_split};
 use crate::worker::{DocId, Progress, Worker};
 
 const SEND_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
@@ -44,8 +43,6 @@ enum SendState {
         /// The request as edited when it was sent, recorded in the history.
         sent: Box<Request>,
         timestamp: i64,
-        /// With their expected values resolved.
-        assertions: Vec<Assertion>,
         /// Set once the response turns out to be an event stream.
         stream: Option<Box<(Response, EventLog)>>,
     },
@@ -62,6 +59,8 @@ struct RequestDoc {
     unresolved: Vec<String>,
     captured: Vec<Captured>,
     assertions: Vec<AssertionResult>,
+    /// What the scripts printed.
+    logs: Vec<String>,
     socket: Option<SocketView>,
     methods: MethodPicker,
 }
@@ -76,6 +75,7 @@ impl RequestDoc {
             unresolved: Vec::new(),
             captured: Vec::new(),
             assertions: Vec::new(),
+            logs: Vec::new(),
             socket: None,
             methods: MethodPicker::default(),
         }
@@ -666,7 +666,6 @@ impl CornuApp {
             let SendState::Sending {
                 sent,
                 timestamp,
-                assertions,
                 started,
                 stream,
                 ..
@@ -674,7 +673,7 @@ impl CornuApp {
             else {
                 continue;
             };
-            let result = match update.progress {
+            let exchange = match update.progress {
                 Progress::Streaming(head) => {
                     *stream = Some(Box::new((head, EventLog::default())));
                     continue;
@@ -685,8 +684,9 @@ impl CornuApp {
                     }
                     continue;
                 }
-                Progress::Done(result) => result,
+                Progress::Done(exchange) => *exchange,
             };
+            let result = exchange.outcome;
             let events = stream.take().map(|stream| stream.1);
             let outcome = match &result {
                 Ok(response) => Outcome::Response {
@@ -704,11 +704,11 @@ impl CornuApp {
                 source: document.path.clone(),
                 outcome,
             };
-            if let Ok(response) = &result {
-                doc.captured = capture(&sent.captures, response);
-                doc.assertions = check(assertions, response);
-                store(&mut self.project.captured, &doc.captured);
-            }
+            doc.unresolved = exchange.unresolved;
+            doc.captured = exchange.captured;
+            doc.assertions = exchange.assertions;
+            doc.logs = exchange.logs;
+            store(&mut self.project.captured, &doc.captured);
             doc.state = match result {
                 Ok(response) => {
                     let view = ResponseView::new(response);
@@ -1205,19 +1205,22 @@ impl CornuApp {
         } else if send && !matches!(doc.state, SendState::Sending { .. }) {
             let mut request = doc.request.clone();
             request.auth = self.project.effective_auth(path.as_deref(), &request.auth);
-            let resolved = request.resolve(&variables);
-            doc.unresolved = resolved.unresolved;
+            let scripts = self
+                .project
+                .effective_scripts(path.as_deref(), &request.scripts);
+            doc.unresolved = request.resolve(&variables).unresolved;
             doc.captured.clear();
             doc.assertions.clear();
-            let assertions = resolved.request.assertions.clone();
-            let handle = self.worker.send(&ctx, id, resolved.request);
+            doc.logs.clear();
+            let handle = self
+                .worker
+                .send(&ctx, id, request, variables.clone(), scripts);
             doc.state = SendState::Sending {
                 abort: handle.abort,
                 stop: Some(handle.stop),
                 started: Instant::now(),
                 sent: Box::new(doc.request.clone()),
                 timestamp: format::unix_now(),
-                assertions,
                 stream: None,
             };
         }
@@ -1272,6 +1275,7 @@ impl CornuApp {
                 }
                 captured_lines(ui, &doc.captured);
                 assertion_lines(ui, &doc.assertions);
+                log_lines(ui, &doc.logs);
                 response_view(ui, &mut doc.state);
             },
         );
@@ -1432,7 +1436,17 @@ impl CornuApp {
                 } else {
                     request.name.clone()
                 };
-                (name, Step { request, variables })
+                let scripts = self
+                    .project
+                    .effective_scripts(path.as_deref(), &request.scripts);
+                (
+                    name,
+                    Step {
+                        request,
+                        variables,
+                        scripts,
+                    },
+                )
             })
             .unzip();
         let plan = RunPlan {
@@ -1961,7 +1975,9 @@ mod tests {
         app.open_draft(request.clone());
         let id = app.active.unwrap();
         let ctx = egui::Context::default();
-        let handle = app.worker.send(&ctx, id, request.clone());
+        let handle = app
+            .worker
+            .send(&ctx, id, request.clone(), Default::default(), Vec::new());
         fn doc(app: &mut CornuApp) -> &mut RequestDoc {
             let id = app.active.unwrap();
             let doc = app.documents.iter_mut().find(|doc| doc.id == id).unwrap();
@@ -1974,7 +1990,6 @@ mod tests {
             abort: handle.abort,
             stop: Some(handle.stop),
             started: Instant::now(),
-            assertions: Vec::new(),
             sent: Box::new(request),
             timestamp: 0,
             stream: None,
@@ -2020,7 +2035,7 @@ mod tests {
 
     #[test]
     fn sent_requests_capture_values_into_session_variables() {
-        use cornu_core::Capture;
+        use cornu_core::{Assertion, Capture};
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -2050,7 +2065,9 @@ mod tests {
         app.open_draft(request.clone());
         let id = app.active.unwrap();
         let ctx = egui::Context::default();
-        let handle = app.worker.send(&ctx, id, request.clone());
+        let handle = app
+            .worker
+            .send(&ctx, id, request.clone(), Default::default(), Vec::new());
         let doc = app.documents.iter_mut().find(|doc| doc.id == id).unwrap();
         let Content::Request(doc) = &mut doc.content else {
             panic!("not a request")
@@ -2059,7 +2076,6 @@ mod tests {
             abort: handle.abort,
             stop: Some(handle.stop),
             started: Instant::now(),
-            assertions: request.assertions.clone(),
             sent: Box::new(request),
             timestamp: 0,
             stream: None,

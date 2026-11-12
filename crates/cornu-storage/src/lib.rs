@@ -9,7 +9,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use cornu_core::{Auth, ClientOptions, Environment, KeyValue, Request, Variables};
+use cornu_core::{
+    Auth, ClientOptions, Environment, KeyValue, NamedScripts, Request, Scripts, Variables,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -56,6 +58,9 @@ pub struct Settings {
     pub variables: Vec<KeyValue>,
     #[serde(default, skip_serializing_if = "Auth::is_inherit")]
     pub auth: Auth,
+    /// Run before and after every request inside, outer folders first.
+    #[serde(default, skip_serializing_if = "Scripts::is_empty")]
+    pub scripts: Scripts,
     /// Only used on disk: once loaded, the position of `Folder::items` is the order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub order: Vec<String>,
@@ -260,6 +265,28 @@ impl Workspace {
         Auth::effective(
             std::iter::once(auth).chain(chain.iter().rev().map(|folder| &folder.settings.auth)),
         )
+    }
+
+    /// The scripts of the workspace and folders around `path`, outermost first, then `own`.
+    pub fn effective_scripts(&self, path: &Path, own: &Scripts) -> Vec<NamedScripts> {
+        let folders = self.folder_chain(path).into_iter().map(|folder| {
+            let origin = if folder.path.as_os_str().is_empty() {
+                "the workspace".to_owned()
+            } else if folder.settings.name.is_empty() {
+                format!("folder {}", folder.path.display())
+            } else {
+                format!("folder {}", folder.settings.name)
+            };
+            (origin, &folder.settings.scripts)
+        });
+        folders
+            .chain(std::iter::once(("the request".to_owned(), own)))
+            .filter(|(_, scripts)| !scripts.is_empty())
+            .map(|(origin, scripts)| NamedScripts {
+                origin,
+                scripts: scripts.clone(),
+            })
+            .collect()
     }
 
     /// Same precedence as Postman: root < folders (outer to inner) < environment.

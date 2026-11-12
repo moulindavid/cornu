@@ -24,6 +24,7 @@ fn step(url: String, variables: &[(&str, &str)]) -> Step {
     Step {
         request: Request::new(Method::Get, url),
         variables: Variables::new().with_layer(variables.iter().copied()),
+        scripts: Vec::new(),
     }
 }
 

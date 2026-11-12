@@ -2,8 +2,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use cornu_core::runner::{CancelToken, RunPlan, RunSummary, StepResult};
 use cornu_core::{
-    ClientOptions, CookieJar, HttpClient, Request, Response, SendError, SseEvent, Streamed,
-    TokenStore,
+    ClientOptions, CookieJar, Exchange, HttpClient, NamedScripts, Request, Response, SendError,
+    SseEvent, Streamed, TokenStore, Variables,
 };
 use eframe::egui;
 use tokio::runtime::Runtime;
@@ -23,7 +23,7 @@ pub enum Progress {
     Streaming(Response),
     Event(SseEvent),
     /// Always the last update of a request.
-    Done(Result<Response, SendError>),
+    Done(Box<Exchange>),
 }
 
 pub struct SendHandle {
@@ -89,7 +89,15 @@ impl Worker {
         Ok(())
     }
 
-    pub fn send(&self, ctx: &egui::Context, doc: DocId, request: Request) -> SendHandle {
+    /// `request` with its effective auth, before its scripts run and its variables are resolved.
+    pub fn send(
+        &self,
+        ctx: &egui::Context,
+        doc: DocId,
+        request: Request,
+        variables: Variables,
+        scripts: Vec<NamedScripts>,
+    ) -> SendHandle {
         let client = self.client.clone();
         let tx = self.tx.clone();
         let ctx = ctx.clone();
@@ -108,12 +116,10 @@ impl Worker {
                     Streamed::Event(event) => Progress::Event(event),
                 })
             };
-            let result = if cornu_core::is_grpc_url(&request.url) {
-                client.grpc_call(&request, stopped, on_update).await
-            } else {
-                client.send_streaming(&request, stopped, on_update).await
-            };
-            report(Progress::Done(result));
+            let exchange =
+                cornu_core::exchange(&client, &request, &variables, &scripts, stopped, on_update)
+                    .await;
+            report(Progress::Done(Box::new(exchange)));
         });
         SendHandle {
             abort: task.abort_handle(),

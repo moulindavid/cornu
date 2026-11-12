@@ -16,6 +16,7 @@ and plain text files you can commit to git.
 - Data-driven runs: replace a variable by a list of values or a CSV file (with or without header)
 - Request chaining: capture response values (JSONPath, headers, status) into variables
 - Response tests: assert on status, headers, JSONPath values, time and size
+- Pre-request and post-response scripts in [Rhai](https://rhai.rs), on requests and folders: change the request, sign it (HMAC, SHA-256), set variables, add tests
 - Cookie jar per workspace, kept outside git, with a viewer to inspect and delete cookies
 - OAuth 2.0: client credentials and authorization code with PKCE, tokens fetched, cached and refreshed automatically
 - Client settings per workspace: timeout, redirects, HTTP or SOCKS proxy, custom CA, client certificates (mutual TLS) and an insecure mode for self-signed servers
@@ -32,7 +33,7 @@ On Linux you may need the usual windowing dev packages (X11/Wayland, `libxkbcomm
 ## Command line
 
 `cornu-cli` runs the requests of a workspace without the app, with the same variables, auth,
-captures, tests, cookies and client settings. It finds the workspace from the current folder up,
+captures, tests, scripts, cookies and client settings. It finds the workspace from the current folder up,
 or takes `--workspace`.
 
 ```sh
@@ -47,7 +48,8 @@ cornu-cli envs                                   # environments, secrets hidden
 ```
 
 `--json` prints a stable JSON document instead of text, for scripts and agents: the resolved
-request (secret values hidden unless `--show-secrets`), the response, captures and test results.
+request (secret values hidden unless `--show-secrets`), the response, captures, test results and
+what scripts printed.
 The exit code is `0` when every request passed, `1` when one failed or could not be sent, and `2`
 for a usage or workspace error. The CLI never prompts: an OAuth 2.0 authorization code token has
 to be fetched once from the app, client credentials tokens are fetched on their own.
