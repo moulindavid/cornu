@@ -10,7 +10,10 @@ repository = "https://github.com/moulindavid/cornu"
 rust-version = "1.95"
 
 [workspace.dependencies]
+anstream = "1"
+anstyle = "1"
 base64 = "0.23"
+clap = { version = "4", features = ["derive"] }
 cornu-core = { path = "crates/cornu-core" }
 cornu-import = { path = "crates/cornu-import" }
 cornu-storage = { path = "crates/cornu-storage" }

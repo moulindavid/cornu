@@ -270,7 +270,9 @@ pub(crate) async fn token(
     }
     match config.grant {
         Grant::ClientCredentials => new_token(client, store, config, |_| {}).await,
-        Grant::AuthorizationCode => Err(oauth("no valid token: authorize in the Auth tab first")),
+        Grant::AuthorizationCode => Err(oauth(
+            "no valid token: get one from the Auth tab of the request in cornu first",
+        )),
     }
 }
 
