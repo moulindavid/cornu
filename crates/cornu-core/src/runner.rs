@@ -10,8 +10,8 @@ use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
 
 use crate::{
-    AssertionResult, Captured, HttpClient, Request, Response, SendError, Variables, capture, check,
-    passed, store,
+    AssertionResult, Captured, HttpClient, NamedScripts, Request, Response, SendError, Variables,
+    exchange, passed, store,
 };
 
 /// The variables one iteration adds on top of each step's own, as `(name, value)`.
@@ -22,6 +22,8 @@ pub struct Step {
     /// With its effective auth already applied; variables are resolved per iteration.
     pub request: Request,
     pub variables: Variables,
+    /// Those of its folders then its own, as `Workspace::effective_scripts` gives them.
+    pub scripts: Vec<NamedScripts>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +74,8 @@ pub struct StepResult {
     pub outcome: Result<Response, SendError>,
     pub captured: Vec<Captured>,
     pub assertions: Vec<AssertionResult>,
+    /// What the scripts printed.
+    pub logs: Vec<String>,
 }
 
 impl StepResult {
@@ -166,21 +170,30 @@ pub async fn run(
                     .clone()
                     .with_layer(row.iter().cloned())
                     .with_layer(captures.iter().cloned());
-                let resolved = step.request.resolve(&variables);
-                let outcome = tokio::select! {
-                    outcome = send(&client, &resolved.request) => outcome,
-                    _ = cancel.cancelled() => Err(SendError::Cancelled),
+                let exchange = tokio::select! {
+                    exchange = exchange(
+                        &client,
+                        &step.request,
+                        &variables,
+                        &step.scripts,
+                        stream_end(&client),
+                        |_| {},
+                    ) => exchange,
+                    _ = cancel.cancelled() => {
+                        let resolved = step.request.resolve(&variables);
+                        crate::Exchange {
+                            request: resolved.request,
+                            unresolved: resolved.unresolved,
+                            outcome: Err(SendError::Cancelled),
+                            captured: Vec::new(),
+                            assertions: Vec::new(),
+                            logs: Vec::new(),
+                        }
+                    }
                 };
-                let (captured, assertions) = match &outcome {
-                    Ok(response) => (
-                        capture(&step.request.captures, response),
-                        check(&resolved.request.assertions, response),
-                    ),
-                    Err(_) => (Vec::new(), Vec::new()),
-                };
-                store(&mut captures, &captured);
-                let count = match &outcome {
-                    Ok(response) if passed(response, &assertions) => Count::Succeeded,
+                store(&mut captures, &exchange.captured);
+                let count = match &exchange.outcome {
+                    Ok(response) if passed(response, &exchange.assertions) => Count::Succeeded,
                     Ok(_) => Count::Failed,
                     Err(_) => Count::Error,
                 };
@@ -191,11 +204,12 @@ pub async fn run(
                 let _ = results.send(StepResult {
                     iteration,
                     step: index,
-                    request: resolved.request,
-                    unresolved: resolved.unresolved,
-                    outcome,
-                    captured,
-                    assertions,
+                    request: exchange.request,
+                    unresolved: exchange.unresolved,
+                    outcome: exchange.outcome,
+                    captured: exchange.captured,
+                    assertions: exchange.assertions,
+                    logs: exchange.logs,
                 });
                 let last = last_iteration && index + 1 == steps.len();
                 if !options.delay.is_zero() && !last {
@@ -230,23 +244,13 @@ pub async fn run(
 }
 
 /// Streams, gRPC or server-sent events, end with the timeout and keep what was received.
-async fn send(client: &HttpClient, request: &Request) -> Result<Response, SendError> {
-    if crate::is_websocket_url(&request.url) {
-        return Err(SendError::WebSocket(
-            "WebSocket requests are opened from the app, they cannot be run".into(),
-        ));
-    }
+fn stream_end(client: &HttpClient) -> impl Future<Output = ()> + use<> {
     let timeout = client.options.timeout;
-    let stop = async move {
+    async move {
         match timeout {
             Some(timeout) => tokio::time::sleep(timeout).await,
             None => std::future::pending().await,
         }
-    };
-    if crate::is_grpc_url(&request.url) {
-        client.grpc_call(request, stop, |_| {}).await
-    } else {
-        client.send_streaming(request, stop, |_| {}).await
     }
 }
 

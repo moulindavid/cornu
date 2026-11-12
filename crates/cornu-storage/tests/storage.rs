@@ -515,3 +515,46 @@ fn client_options_live_in_the_workspace_config() {
         settings.client
     );
 }
+
+#[test]
+fn scripts_are_stored_and_chained_from_the_outermost_folder() {
+    let (dir, workspace) = workspace();
+    let api = workspace.new_folder_path(Path::new(""), "Api");
+    fs::create_dir_all(dir.path().join(&api)).unwrap();
+    let mut request = Request::new(Method::Get, "{{base}}/items").with_name("Items");
+    request.scripts = cornu_core::Scripts {
+        pre: "vars.a = 1;".into(),
+        post: "test(\"ok\", response.status == 200);".into(),
+    };
+    let entry = RequestEntry {
+        path: workspace.new_request_path(&api, "Items"),
+        request,
+    };
+    workspace.save_request(&entry).unwrap();
+    let mut root = workspace.tree.clone();
+    root.settings.scripts.pre = "vars.root = 1;".into();
+    workspace.save_folder(&root).unwrap();
+    let folder = Folder {
+        path: api.clone(),
+        settings: Settings {
+            name: "Api".into(),
+            scripts: cornu_core::Scripts {
+                pre: String::new(),
+                post: "print(response.status);".into(),
+            },
+            ..Default::default()
+        },
+        items: Vec::new(),
+    };
+    workspace.save_folder(&folder).unwrap();
+
+    let text = read(dir.path(), &entry.path);
+    assert!(text.contains("[scripts]\npre = \"vars.a = 1;\""), "{text}");
+    let workspace = Workspace::load(dir.path()).unwrap();
+    let loaded = workspace.find_request(&entry.path).unwrap();
+    assert_eq!(loaded.request, entry.request);
+    let chain = workspace.effective_scripts(&entry.path, &loaded.request.scripts);
+    let origins: Vec<_> = chain.iter().map(|named| named.origin.as_str()).collect();
+    assert_eq!(origins, ["the workspace", "folder Api", "the request"]);
+    assert_eq!(chain[0].scripts.pre, "vars.root = 1;");
+}

@@ -241,7 +241,14 @@ impl Run<'_> {
                     .workspace
                     .variables(&entry.path, environment)
                     .with_layer(self.variables.variables.iter().cloned());
-                Step { request, variables }
+                let scripts = self
+                    .workspace
+                    .effective_scripts(&entry.path, &request.scripts);
+                Step {
+                    request,
+                    variables,
+                    scripts,
+                }
             })
             .collect();
         let names = entries

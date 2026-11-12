@@ -21,6 +21,7 @@ csv = "1"
 cookie_store = { version = "0.22", default-features = false, features = ["serde_json"] }
 eframe = "0.37"
 fastrand = "2"
+hmac = "0.12"
 http = "1"
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
@@ -29,6 +30,7 @@ prost = "0.14"
 prost-reflect = { version = "0.16", features = ["serde"] }
 prost-types = "0.14"
 rfd = "0.17"
+rhai = { version = "1", features = ["serde"] }
 reqwest = { version = "0.13", features = ["gzip", "brotli", "deflate", "zstd", "multipart", "cookies", "socks"] }
 rustls-platform-verifier = "0.7"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }

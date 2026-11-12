@@ -72,6 +72,9 @@ pub fn print_result(result: &StepResult, names: &[String], iterations: usize) {
             );
         }
     }
+    for line in &result.logs {
+        anstream::println!("    {DIM}›{DIM:#} {line}");
+    }
     if !result.unresolved.is_empty() {
         anstream::println!(
             "    {YELLOW}⚠{YELLOW:#} unresolved variables: {}",
@@ -132,6 +135,7 @@ pub fn result_json(result: &StepResult, names: &[String], masker: &Masker) -> Va
             "headers": headers,
         },
         "unresolved": result.unresolved,
+        "logs": result.logs,
         "captures": result.captured.iter().map(|captured| match &captured.value {
             Ok(value) => json!({"variable": captured.variable, "value": value}),
             Err(error) => json!({"variable": captured.variable, "error": error.to_string()}),

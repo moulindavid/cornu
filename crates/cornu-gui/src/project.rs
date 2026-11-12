@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use cornu_core::{Auth, Environment, Variables};
+use cornu_core::{Auth, Environment, NamedScripts, Scripts, Variables};
 use cornu_storage::{EnvironmentEntry, Folder, History, Settings, StorageError, Workspace};
 
 /// The open workspace, or an in-memory scratch one when nothing is open.
@@ -88,6 +88,11 @@ impl Project {
     pub fn effective_auth(&self, path: Option<&Path>, auth: &Auth) -> Auth {
         let path = path.unwrap_or(Path::new(""));
         self.workspace.effective_auth(path, auth)
+    }
+
+    pub fn effective_scripts(&self, path: Option<&Path>, own: &Scripts) -> Vec<NamedScripts> {
+        let path = path.unwrap_or(Path::new(""));
+        self.workspace.effective_scripts(path, own)
     }
 
     pub fn save_folder(&mut self, path: &Path, settings: Settings) -> Result<(), StorageError> {

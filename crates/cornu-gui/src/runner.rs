@@ -885,6 +885,7 @@ mod tests {
                 _ => Vec::new(),
             },
             outcome,
+            logs: Vec::new(),
         }))
     }
 

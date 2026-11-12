@@ -2,7 +2,7 @@ use std::path::Path;
 
 use eframe::egui;
 
-use crate::editor::auth_editor;
+use crate::editor::{auth_editor, scripts_editor, scripts_label};
 use crate::oauth::TokenPanel;
 use crate::project::Project;
 use crate::widgets::{count_label, variable_table};
@@ -12,6 +12,7 @@ pub enum FolderTab {
     #[default]
     Auth,
     Variables,
+    Scripts,
 }
 
 /// Edits are saved as they happen; returns an error message if saving failed.
@@ -35,15 +36,16 @@ pub fn folder_view(
         format!("📁 {}", settings.name)
     });
     ui.weak(if is_root {
-        "Auth and variables here apply to every request of the workspace."
+        "Auth, variables and scripts here apply to every request of the workspace."
     } else {
-        "Auth and variables here apply to every request in this folder."
+        "Auth, variables and scripts here apply to every request in this folder."
     });
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         ui.selectable_value(tab, FolderTab::Auth, "Auth");
         let variables = count_label("Variables", &settings.variables);
         ui.selectable_value(tab, FolderTab::Variables, variables);
+        ui.selectable_value(tab, FolderTab::Scripts, scripts_label(&settings.scripts));
     });
     ui.separator();
 
@@ -53,6 +55,7 @@ pub fn folder_view(
         .show(ui, |ui| match tab {
             FolderTab::Auth => auth_editor(ui, &mut settings.auth, token),
             FolderTab::Variables => variable_table(ui, id, &mut settings.variables),
+            FolderTab::Scripts => scripts_editor(ui, &mut settings.scripts),
         });
 
     if settings == folder.settings {
