@@ -6,7 +6,7 @@ use cornu_core::{
     AssertionResult, Auth, Captured, ClientOptions, Method, OAuth2, Request, Response, store,
 };
 use cornu_storage::{HistoryEntry, Outcome, moved_path};
-use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers};
+use eframe::egui::{self, Color32};
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 
@@ -21,6 +21,7 @@ use crate::grpc::{self, MethodPicker};
 use crate::history::{HistoryAction, HistoryPanel};
 use crate::import::SpecImport;
 use crate::oauth::{Flow, FlowEvent, TokenAction, TokenPanel};
+use crate::palette::{self, Command, Entry, Mode, Palette};
 use crate::project::Project;
 use crate::response::{ResponseView, status_color};
 use crate::runner::{RunTarget, RunnerAction, RunnerTab, StepInfo, folder_requests};
@@ -29,8 +30,6 @@ use crate::websocket::{SocketAction, SocketView, message, set_message};
 use crate::widgets::{assertion_lines, captured_lines, log_lines, variable_field, vertical_split};
 use crate::worker::{DocId, Progress, Worker};
 
-const SEND_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
-const SAVE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
 const WORKSPACE_KEY: &str = "workspace";
 const NEW_REQUEST: &str = "New request";
 
@@ -151,6 +150,10 @@ pub struct CornuApp {
     tokens_saved: u64,
     oauth: Option<Flow>,
     client_settings: ClientSettingsWindow,
+    palette: Palette,
+    shortcuts_open: bool,
+    /// Asked from the palette, carried out by the active request on its next frame.
+    request_command: Option<Command>,
 }
 
 impl CornuApp {
@@ -176,6 +179,9 @@ impl CornuApp {
             tokens_saved: 0,
             oauth: None,
             client_settings: ClientSettingsWindow::default(),
+            palette: Palette::default(),
+            shortcuts_open: false,
+            request_command: None,
         };
         if let Some(root) = workspace {
             app.switch_workspace(Project::open(&root));
@@ -726,6 +732,216 @@ impl CornuApp {
         }
     }
 
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        if self.palette.is_open() {
+            return;
+        }
+        // Shift variants first: a shortcut also matches with shift held.
+        let bindings = [
+            (palette::PALETTE_ALT, None),
+            (palette::PALETTE, None),
+            (palette::GO_TO, None),
+            (palette::ENVIRONMENT, None),
+            (palette::PREVIOUS_TAB_ALT, Some(Command::PreviousTab)),
+            (palette::NEXT_TAB_ALT, Some(Command::NextTab)),
+            (palette::PREVIOUS_TAB, Some(Command::PreviousTab)),
+            (palette::NEXT_TAB, Some(Command::NextTab)),
+            (palette::SAVE, Some(Command::Save)),
+            (palette::NEW_REQUEST, Some(Command::NewRequest)),
+            (palette::CLOSE_TAB, Some(Command::CloseTab)),
+            (palette::FOCUS_URL, Some(Command::FocusUrl)),
+            (palette::SHORTCUTS, Some(Command::Shortcuts)),
+        ];
+        for (shortcut, command) in bindings {
+            if !ctx.input_mut(|input| input.consume_shortcut(&shortcut)) {
+                continue;
+            }
+            match command {
+                Some(command) => self.run_command(ctx, command),
+                None if shortcut == palette::GO_TO => self.palette.open(Mode::Requests),
+                None if shortcut == palette::ENVIRONMENT => self.palette.open(Mode::Environments),
+                None => self.palette.open(Mode::Everything),
+            }
+            return;
+        }
+    }
+
+    fn palette_entries(&self) -> Vec<Entry> {
+        let on_disk = self.project.is_on_disk();
+        let request_open = self
+            .active
+            .and_then(|id| self.documents.iter().find(|doc| doc.id == id))
+            .is_some_and(|doc| doc.request().is_some());
+        let mut entries = Vec::new();
+        let mut command = |label: &str, command: Command, shown: bool| {
+            if shown {
+                entries.push(Entry::new(label, "", command));
+            }
+        };
+        command("Send request", Command::Send, request_open);
+        command("Save", Command::Save, self.active.is_some());
+        command("Copy as cURL", Command::CopyAsCurl, request_open);
+        command("Run with data…", Command::RunWithData, request_open);
+        command("Focus the URL", Command::FocusUrl, request_open);
+        command("New request", Command::NewRequest, true);
+        command("Close tab", Command::CloseTab, self.active.is_some());
+        command("Next tab", Command::NextTab, self.open_tabs.len() > 1);
+        command(
+            "Previous tab",
+            Command::PreviousTab,
+            self.open_tabs.len() > 1,
+        );
+        command("Manage environments…", Command::ManageEnvironments, true);
+        command("Workspace settings", Command::WorkspaceSettings, on_disk);
+        command(
+            "Run every request of the workspace",
+            Command::RunWorkspace,
+            on_disk,
+        );
+        command("Show the collection", Command::ShowCollection, true);
+        command("Show the history", Command::ShowHistory, true);
+        command("Cookies…", Command::Cookies, true);
+        command("Client settings…", Command::ClientSettings, true);
+        command("Open workspace…", Command::OpenWorkspace, true);
+        command("New workspace…", Command::NewWorkspace, true);
+        command("Close workspace", Command::CloseWorkspace, on_disk);
+        command("Import Postman collection…", Command::ImportPostman, true);
+        command(
+            "Import Postman environment…",
+            Command::ImportPostmanEnvironment,
+            true,
+        );
+        command(
+            "Import OpenAPI / Swagger file…",
+            Command::ImportOpenApiFile,
+            true,
+        );
+        command(
+            "Import OpenAPI / Swagger from URL…",
+            Command::ImportOpenApiUrl,
+            true,
+        );
+        command("Keyboard shortcuts", Command::Shortcuts, true);
+
+        entries.push(Entry::new(
+            "Environment: none",
+            "",
+            Command::UseEnvironment(None),
+        ));
+        for (index, entry) in self.project.workspace.environments.iter().enumerate() {
+            let label = format!("Environment: {}", entry.environment.name);
+            let detail = if self.environments.active == Some(index) {
+                "active"
+            } else {
+                ""
+            };
+            entries.push(Entry::new(
+                label,
+                detail,
+                Command::UseEnvironment(Some(index)),
+            ));
+        }
+        for &id in &self.open_tabs {
+            if let Some(doc) = self.documents.iter().find(|doc| doc.id == id) {
+                entries.push(Entry::new(
+                    self.tab_title(doc),
+                    "open tab",
+                    Command::ShowTab(id),
+                ));
+            }
+        }
+        if on_disk {
+            for entry in crate::runner::folder_requests(&self.project.workspace.tree) {
+                let request = &entry.request;
+                let name = if request.name.is_empty() {
+                    "Untitled request"
+                } else {
+                    &request.name
+                };
+                let path = entry.path.to_string_lossy().replace('\\', "/");
+                let path = path
+                    .strip_suffix(cornu_storage::REQUEST_SUFFIX)
+                    .unwrap_or(&path);
+                let detail = format!("{} {path}", request.method.as_str());
+                entries.push(Entry::new(
+                    name,
+                    detail,
+                    Command::OpenRequest(entry.path.clone()),
+                ));
+            }
+            let mut folders = Vec::new();
+            collect_folders(&self.project.workspace.tree, &mut folders);
+            for (name, path) in folders {
+                entries.push(Entry::new(
+                    format!("Folder: {name}"),
+                    path.display().to_string(),
+                    Command::OpenFolder(path),
+                ));
+            }
+        }
+        entries
+    }
+
+    fn run_command(&mut self, ctx: &egui::Context, command: Command) {
+        match command {
+            Command::OpenRequest(path) => self.open_request(&path),
+            Command::OpenFolder(path) => self.open_folder(&path),
+            Command::ShowTab(id) => self.active = Some(id),
+            Command::UseEnvironment(index) => self.environments.active = index,
+            Command::NewRequest => self.new_draft(),
+            Command::Save => {
+                if let Some(id) = self.active {
+                    self.save(id);
+                }
+            }
+            Command::Send | Command::CopyAsCurl | Command::RunWithData | Command::FocusUrl => {
+                self.request_command = Some(command);
+            }
+            Command::CloseTab => {
+                if let Some(id) = self.active {
+                    self.request_close(id);
+                }
+            }
+            Command::NextTab | Command::PreviousTab => {
+                let count = self.open_tabs.len();
+                let current = self
+                    .active
+                    .and_then(|id| self.open_tabs.iter().position(|&tab| tab == id));
+                if let Some(current) = current
+                    && count > 1
+                {
+                    let next = if command == Command::NextTab {
+                        (current + 1) % count
+                    } else {
+                        (current + count - 1) % count
+                    };
+                    self.active = Some(self.open_tabs[next]);
+                }
+            }
+            Command::ManageEnvironments => self.environments.open_manager(),
+            Command::OpenWorkspace => self.pick_workspace(false),
+            Command::NewWorkspace => self.pick_workspace(true),
+            Command::CloseWorkspace => self.close_workspace(),
+            Command::WorkspaceSettings => self.open_folder(Path::new("")),
+            Command::RunWorkspace => self.open_runner(Some(PathBuf::new()), RunTarget::Folder),
+            Command::ImportPostman => self.import_file(ctx, FileImport::Postman),
+            Command::ImportPostmanEnvironment => self.import_postman_environments(),
+            Command::ImportOpenApiFile => self.import_file(ctx, FileImport::OpenApi),
+            Command::ImportOpenApiUrl => {
+                if self.project.is_on_disk() {
+                    self.spec_import.open();
+                } else {
+                    self.notice = Some(Notice::error(NEEDS_WORKSPACE));
+                }
+            }
+            Command::ClientSettings => self.client_settings.open(),
+            Command::Cookies => self.cookies.open = true,
+            Command::ShowCollection => self.sidebar_tab = SidebarTab::Collection,
+            Command::ShowHistory => self.sidebar_tab = SidebarTab::History,
+            Command::Shortcuts => self.shortcuts_open = true,
+        }
+    }
+
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let title = if self.project.is_on_disk() {
@@ -997,7 +1213,9 @@ impl CornuApp {
 
     fn request_view(&mut self, ui: &mut egui::Ui, id: DocId) {
         let ctx = ui.ctx().clone();
-        let send_pressed = ui.input_mut(|input| input.consume_shortcut(&SEND_SHORTCUT));
+        let command = self.request_command.take();
+        let send_pressed = ui.input_mut(|input| input.consume_shortcut(&palette::SEND))
+            || command == Some(Command::Send);
         let Some(doc) = self.documents.iter_mut().find(|doc| doc.id == id) else {
             return;
         };
@@ -1010,6 +1228,9 @@ impl CornuApp {
         };
 
         let url_id = egui::Id::unique(("url", id));
+        if command == Some(Command::FocusUrl) {
+            ui.memory_mut(|memory| memory.request_focus(url_id));
+        }
         if ui.memory(|memory| memory.has_focus(url_id))
             && let Some(command) = ui.input_mut(|input| take_curl_paste(&mut input.events))
         {
@@ -1049,8 +1270,8 @@ impl CornuApp {
         let mut disconnect = false;
         let mut cancel = false;
         let mut save = false;
-        let mut copy_curl = false;
-        let mut run = false;
+        let mut copy_curl = command == Some(Command::CopyAsCurl);
+        let mut run = command == Some(Command::RunWithData);
         ui.horizontal(|ui| {
             if websocket {
                 ui.add_sized(
@@ -1488,6 +1709,22 @@ impl CornuApp {
                 if modified > 0 {
                     ui.weak(format!("{modified} unsaved request(s)"));
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let hint = format!(
+                        "{} commands · {} shortcuts",
+                        ui.ctx().format_shortcut(&palette::PALETTE),
+                        ui.ctx().format_shortcut(&palette::SHORTCUTS)
+                    );
+                    if ui
+                        .add(
+                            egui::Label::new(egui::RichText::new(hint).weak())
+                                .sense(egui::Sense::click()),
+                        )
+                        .clicked()
+                    {
+                        self.palette.open(Mode::Everything);
+                    }
+                });
             }
         });
     }
@@ -1635,6 +1872,50 @@ enum Close {
     Cancel,
 }
 
+fn collect_folders(folder: &cornu_storage::Folder, into: &mut Vec<(String, PathBuf)>) {
+    for item in &folder.items {
+        if let cornu_storage::Item::Folder(child) = item {
+            let name = match child.settings.name.as_str() {
+                "" => child
+                    .path
+                    .file_name()
+                    .map_or(String::new(), |name| name.to_string_lossy().into_owned()),
+                name => name.to_owned(),
+            };
+            into.push((name, child.path.clone()));
+            collect_folders(child, into);
+        }
+    }
+}
+
+fn shortcuts_window(ctx: &egui::Context, open: &mut bool) {
+    egui::Window::new("Keyboard shortcuts")
+        .open(open)
+        .collapsible(false)
+        .resizable(false)
+        .show(ctx, |ui| {
+            egui::Grid::new("shortcuts")
+                .num_columns(2)
+                .spacing([24.0, 6.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    for (description, shortcuts) in palette::SHORTCUT_HELP {
+                        ui.label(description);
+                        let keys: Vec<String> = shortcuts
+                            .iter()
+                            .map(|shortcut| ctx.format_shortcut(shortcut))
+                            .collect();
+                        ui.monospace(if keys.is_empty() {
+                            "—".to_owned()
+                        } else {
+                            keys.join("  or  ")
+                        });
+                        ui.end_row();
+                    }
+                });
+        });
+}
+
 fn response_view(ui: &mut egui::Ui, state: &mut SendState) {
     match state {
         SendState::Idle => {
@@ -1718,11 +1999,7 @@ impl eframe::App for CornuApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.collect_completed();
         self.poll_token_flow(ui.ctx());
-        if ui.input_mut(|input| input.consume_shortcut(&SAVE_SHORTCUT))
-            && let Some(id) = self.active
-        {
-            self.save(id);
-        }
+        self.handle_shortcuts(ui.ctx());
 
         egui::Panel::left("sidebar")
             .resizable(true)
@@ -1778,6 +2055,13 @@ impl eframe::App for CornuApp {
             self.client_settings.applied(result);
         }
         self.dialogs(ui.ctx());
+        if self.palette.is_open() {
+            let entries = self.palette_entries();
+            if let Some(command) = self.palette.show(ui.ctx(), &entries) {
+                self.run_command(ui.ctx(), command);
+            }
+        }
+        shortcuts_window(ui.ctx(), &mut self.shortcuts_open);
         if let Some(discovered) = self.spec_import.show(ui.ctx(), &self.worker) {
             self.import_collection(ui.ctx(), Ok(discovered.collection));
             if let Some(notice) = &mut self.notice
@@ -1828,6 +2112,112 @@ fn import_postman_environment(file: &Path, project: &mut Project) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn press(app: &mut CornuApp, ctx: &egui::Context, key: egui::Key, shift: bool) {
+        let modifiers = egui::Modifiers {
+            shift,
+            ..egui::Modifiers::COMMAND
+        };
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.handle_shortcuts(ui.ctx()));
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn shortcuts_drive_tabs_and_open_the_palette() {
+        let ctx = egui::Context::default();
+        let mut app = CornuApp::new(Worker::new().unwrap(), None);
+        assert_eq!(app.open_tabs.len(), 1);
+        let first = app.active;
+
+        press(&mut app, &ctx, egui::Key::N, false);
+        assert_eq!(app.open_tabs.len(), 2);
+        let second = app.active;
+        assert_ne!(first, second);
+
+        press(&mut app, &ctx, egui::Key::PageUp, false);
+        assert_eq!(app.active, first);
+        press(&mut app, &ctx, egui::Key::Tab, false);
+        assert_eq!(app.active, second);
+        press(&mut app, &ctx, egui::Key::Tab, true);
+        assert_eq!(app.active, first);
+
+        press(&mut app, &ctx, egui::Key::W, false);
+        assert_eq!(app.open_tabs.len(), 1);
+        assert_eq!(app.active, second);
+
+        press(&mut app, &ctx, egui::Key::E, false);
+        assert!(app.palette.is_open());
+        press(&mut app, &ctx, egui::Key::N, false);
+        assert_eq!(
+            app.open_tabs.len(),
+            1,
+            "shortcuts wait while the palette is open"
+        );
+    }
+
+    #[test]
+    fn the_palette_lists_requests_folders_and_environments() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = CornuApp::new(Worker::new().unwrap(), None);
+        app.switch_workspace(Project::create(dir.path()));
+        let folder = app
+            .project
+            .workspace
+            .new_folder_path(Path::new(""), "Users");
+        std::fs::create_dir_all(dir.path().join(&folder)).unwrap();
+        let path = app
+            .project
+            .workspace
+            .new_request_path(&folder, "List users");
+        app.project
+            .workspace
+            .save_request(&cornu_storage::RequestEntry {
+                path: path.clone(),
+                request: Request::new(Method::Get, "{{base}}/users").with_name("List users"),
+            })
+            .unwrap();
+        app.project
+            .add_environment(cornu_core::Environment::new("dev"))
+            .unwrap();
+        app.switch_workspace(Project::open(dir.path()));
+
+        let entries = app.palette_entries();
+        let find = |label: &str| entries.iter().find(|entry| entry.label == label);
+        let request = find("List users").unwrap();
+        assert_eq!(request.detail, "GET users/list-users");
+        assert_eq!(request.command, Command::OpenRequest(path.clone()));
+        assert!(find("Folder: users").is_some());
+        assert!(find("Close workspace").is_some());
+
+        let ctx = egui::Context::default();
+        let environment = find("Environment: dev").unwrap().command.clone();
+        app.run_command(&ctx, environment);
+        assert_eq!(app.environments.active, Some(0));
+        app.active = None;
+        assert!(
+            !app.palette_entries()
+                .iter()
+                .any(|entry| entry.command == Command::Send)
+        );
+        app.run_command(&ctx, Command::OpenRequest(path));
+        assert!(
+            app.palette_entries()
+                .iter()
+                .any(|entry| entry.command == Command::Send)
+        );
+        app.run_command(&ctx, Command::Send);
+        assert_eq!(app.request_command, Some(Command::Send));
+    }
 
     #[test]
     fn postman_environment_imports_into_scratch_project() {

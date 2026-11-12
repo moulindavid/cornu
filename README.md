@@ -20,6 +20,7 @@ and plain text files you can commit to git.
 - Cookie jar per workspace, kept outside git, with a viewer to inspect and delete cookies
 - OAuth 2.0: client credentials and authorization code with PKCE, tokens fetched, cached and refreshed automatically
 - Client settings per workspace: timeout, redirects, HTTP or SOCKS proxy, custom CA, client certificates (mutual TLS) and an insecure mode for self-signed servers
+- Keyboard first: a command palette (`Ctrl+K`) to run any action, jump to a request (`Ctrl+P`) or switch environment (`Ctrl+E`), and shortcuts for tabs, saving and sending (`F1` lists them)
 - Native desktop GUI built with [egui](https://github.com/emilk/egui), and a headless CLI for CI, scripts and agents
 
 ## Building
