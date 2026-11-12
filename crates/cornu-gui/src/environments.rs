@@ -29,6 +29,10 @@ impl Default for Environments {
 }
 
 impl Environments {
+    pub fn open_manager(&mut self) {
+        self.manager_open = true;
+    }
+
     pub fn reset(&mut self) {
         *self = Self::default();
     }
