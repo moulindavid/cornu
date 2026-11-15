@@ -63,3 +63,8 @@ all = { level = "warn", priority = -1 }
 [profile.release]
 lto = "thin"
 strip = true
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

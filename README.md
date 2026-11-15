@@ -22,6 +22,25 @@ and plain text files you can commit to git.
 - Client settings per workspace: timeout, redirects, HTTP or SOCKS proxy, custom CA, client certificates (mutual TLS) and an insecure mode for self-signed servers
 - Native desktop GUI built with [egui](https://github.com/emilk/egui), and a headless CLI for CI, scripts and agents
 
+## Installing
+
+Each release on GitHub ships `cornu` (the app) and `cornu-cli` for Linux (x86_64, arm64), macOS
+(Intel, Apple silicon) and Windows, with installer scripts:
+
+```sh
+# Linux and macOS
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/moulindavid/cornu/releases/latest/download/cornu-gui-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/moulindavid/cornu/releases/latest/download/cornu-cli-installer.sh | sh
+```
+
+```powershell
+# Windows
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/moulindavid/cornu/releases/latest/download/cornu-gui-installer.ps1 | iex"
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/moulindavid/cornu/releases/latest/download/cornu-cli-installer.ps1 | iex"
+```
+
+The archives and their SHA-256 checksums can also be downloaded from the release page.
+
 ## Building
 
 ```sh
@@ -53,6 +72,14 @@ what scripts printed.
 The exit code is `0` when every request passed, `1` when one failed or could not be sent, and `2`
 for a usage or workspace error. The CLI never prompts: an OAuth 2.0 authorization code token has
 to be fetched once from the app, client credentials tokens are fetched on their own.
+
+## Releasing
+
+Releases are built by [dist](https://github.com/axodotdev/cargo-dist) (`.github/workflows/release.yml`,
+configured in `dist-workspace.toml`). Set the new version in the workspace `Cargo.toml`, merge it,
+then push a matching tag: `git tag v0.2.0 && git push origin v0.2.0`. A suffix such as
+`v0.2.0-beta.1` publishes a prerelease. After changing the dist configuration, run
+`dist generate` to update the workflow.
 
 ## Workspace layout
 
