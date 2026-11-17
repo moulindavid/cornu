@@ -11,6 +11,7 @@ mod highlight;
 mod history;
 mod import;
 mod oauth;
+mod palette;
 mod project;
 mod query_editor;
 mod response;
