@@ -14,7 +14,7 @@ use prost_types::{
     DescriptorProto, FieldDescriptorProto, FileDescriptorProto, FileDescriptorSet,
     MethodDescriptorProto, ServiceDescriptorProto,
 };
-use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+use rcgen::{BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
@@ -161,7 +161,7 @@ impl tower::Service<http::Request<tonic::body::Body>> for Greeter {
                         let to = request.into_inner().n;
                         let stream = futures_util::stream::iter(1..=to).then(|n| async move {
                             if n > 1 {
-                                tokio::time::sleep(Duration::from_millis(200)).await;
+                                tokio::time::sleep(Duration::from_millis(400)).await;
                             }
                             Ok::<_, Status>(Number { n })
                         });
@@ -267,13 +267,16 @@ async fn tls_server() -> (String, String) {
     let ca_key = KeyPair::generate().unwrap();
     let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params
+        .distinguished_name
+        .push(DnType::CommonName, "cornu test CA");
     let ca_pem = ca_params.self_signed(&ca_key).unwrap().pem();
     let issuer = rcgen::Issuer::new(ca_params, ca_key);
     let key = KeyPair::generate().unwrap();
-    let cert = CertificateParams::new(vec!["localhost".to_owned()])
-        .unwrap()
-        .signed_by(&key, &issuer)
-        .unwrap();
+    let mut params = CertificateParams::new(vec!["localhost".to_owned()]).unwrap();
+    // The Windows verifier, unlike the others, rejects a server certificate without it.
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    let cert = params.signed_by(&key, &issuer).unwrap();
     let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::aws_lc_rs::default_provider(),
     ))
@@ -383,7 +386,8 @@ async fn unary_calls_send_json_metadata_and_auth() {
 async fn server_streams_are_reported_and_can_be_stopped() {
     let url = plain_server(Reflection::V1).await;
     let client = HttpClient::new(&ClientOptions {
-        timeout: Some(Duration::from_millis(300)),
+        // Shorter than the stream, long enough for reflection on a slow CI runner.
+        timeout: Some(Duration::from_millis(700)),
         ..Default::default()
     })
     .unwrap();
