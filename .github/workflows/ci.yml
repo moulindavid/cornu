@@ -44,4 +44,4 @@ jobs:
           sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libxkbcommon-dev libwayland-dev libssl-dev
       - run: cargo clippy --workspace --all-targets --locked
-      - run: cargo test --workspace --locked
+      - run: cargo test --workspace --locked --no-fail-fast
