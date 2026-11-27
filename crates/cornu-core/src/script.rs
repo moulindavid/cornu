@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use base64::Engine as _;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use rhai::{Dynamic, Engine, ImmutableString, Map, Scope};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
