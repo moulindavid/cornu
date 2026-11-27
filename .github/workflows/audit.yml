@@ -1,0 +1,20 @@
+name: Audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # New advisories appear without any change here.
+  schedule:
+    - cron: "0 6 * * 1"
+
+jobs:
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
