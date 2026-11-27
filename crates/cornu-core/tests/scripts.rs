@@ -3,7 +3,7 @@ use cornu_core::{
     Assertion, ClientOptions, HttpClient, Method, NamedScripts, Request, Scripts, SendError,
     Variables, exchange,
 };
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
